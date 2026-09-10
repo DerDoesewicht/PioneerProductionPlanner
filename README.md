@@ -1,108 +1,97 @@
 # Pioneer Production Planner
 
-> Plan production from your target outputs or available inputs — directly inside Satisfactory.
+> Plan production chains and power systems directly inside Satisfactory — from desired products or the resources you already have.
 
-[![Multi-product planning and resource extraction settings](screenshots/1-Planung.png)](screenshots/1-Planung.png)
+[![Production planning](screenshots/1-Planung.png)](screenshots/1-Planung.png)
 
-Pioneer Production Planner is an in-game factory and power planner for Satisfactory. It reads recipes, machines, unlocks and transport tiers from the currently loaded save and turns them into a production plan with material flows, machine counts and construction estimates.
+Pioneer Production Planner turns the recipes, machines, unlocks and transport tiers available in your loaded save into a production plan. Calculate several final products together, choose how resources are obtained, inspect machine counts and clock speeds, and follow the complete chain in an interactive graph.
 
-Plan the products you want to make, or enter the resources you already have and calculate the output your selected recipe chains can support.
+Vanilla is supported. Satisfactory Plus, KAPI/KLib and Industrial Evolution are optional integrations, not required dependencies.
 
-The planner supports Vanilla content and compatible modded recipe sets. Satisfactory Plus, KAPI and KLib are optional integrations, not required dependencies. The screenshots below show a Satisfactory Plus factory.
+## New in 1.2.0
 
-## Plan your production
+- **Plan from available inputs.** Enter your available resource rates and calculate achievable final-product rates for the selected recipe chains.
+- **Adjust the result.** Set desired rates for individual products and recalculate the remaining free outputs within your input limits.
+- **Industrial Evolution machines.** Select compatible Mk.2 and Mk.3 production machines under **More settings → Production machines**, directly below conveyor belt and lift settings.
+- **More compact planning.** Additional settings are grouped together, with machine selections shared by steps that offer the same compatible variants.
+- **Clear guidance.** English and German instructions explain when to calculate, choose machines, recalculate and save.
+- **Recipe-dependent power.** Variable-power machines use runtime recipe data and power curves. Recipe ranges and approximate cycle averages help distinguish average demand from peaks.
+- **Clearer power labels.** “Power demand at planned clock speeds” replaces the ambiguous “base power” label.
 
-### Start with target products
+## Two ways to plan
 
-Choose multiple final products and set an independent target rate for each one. Shared intermediate products are combined into one factory plan.
+### Start with final products
 
-Use the compact product search to add targets. Conveyor belt, conveyor lift and average connection-length settings are available under **More settings**.
+Choose one or more products and their target rates per minute. The planner calculates the required production chain, shared intermediates, raw inputs and machines.
 
 ### Start with available inputs
 
-Enable **Plan from available inputs** and enter your available supply as a number of lines and a rate per line — for example, **2 × 150 Siterite Ore/min**.
+Enable **Plan from available inputs**, enter your supply rates, and choose the outputs you want. For example, two Siterite Ore supplies at 150/min give a total budget of 300/min for an iron-products plan in Satisfactory Plus.
 
-Add the products you want to make and calculate:
+Free outputs are increased together. You can set individual output rates as fixed wishes and recalculate what remains achievable. The result depends on your selected recipes and available inputs; this mode does not search every possible recipe combination for a global optimum.
 
-- Free outputs increase together at an equal rate per minute.
-- Editing an output rate makes it a fixed request.
-- Recalculate to distribute the remaining capacity among the free outputs.
-- Release a fixed request to let that product scale again.
-- If fixed requests exceed the available supply, the planner reports the shortfall instead of silently reducing them.
+## Recipes, extraction and machine selection
 
-The maximum applies to the **selected recipe chains**. Additional required resources are listed separately; they must also be supplied to achieve the calculated output.
+Choose the supply method for each relevant product: manufacturing recipes, conversion or direct extraction where available. For extraction, check the resource source, miner, purity, modules/drill head and operating fluid against your actual factory.
 
-### Choose recipes and resource sources
+For production machine variants:
 
-The **Recipes & Resource Extraction** panel shows choices relevant to the production chain.
+1. Choose your final products or available inputs.
+2. Calculate the plan once.
+3. Open **More settings → Production machines** and select the desired variant.
+4. Recalculate, then save the plan.
 
-Select standard recipes, alternative recipes, conversion or direct extraction where available. For extraction, check the source, miner and node purity. Compatible modular miners also expose supported mining heads, processing modules and operating fluids.
+The selectors apply to compatible steps in the current plan. With the unlock filter enabled, only unlocked options are offered. Processing modules inside a Modular Miner remain part of resource extraction settings.
 
-The panel distinguishes the requested **output** from the **raw resource at the input**. A processed output may require a processing module; choose a separate production recipe if you want to mine raw ore and process it in another machine.
+A faster machine does not necessarily reduce total power demand: if production speed and power rise by the same factor, fewer machines can produce the same output at the same total consumption.
 
-Automatic selections are starting assumptions. Review them against the equipment and resource nodes you intend to use, then confirm and recalculate.
+## Features
 
-## Follow the production graph
+- Multiple final products with separate target rates.
+- Shared intermediate production and by-product accounting.
+- Automatic recipe selection and manual overrides.
+- Whole machines to build, with clock-speed allocation.
+- Separate conveyor belt and lift tiers.
+- Continuous parallel transport routes and routing buildings where needed.
+- Resource demand, input limits and estimated construction costs.
+- Net power planning, including fuel chains, self-consumption and reserve settings.
+- Zoomable production graph with material/rate labels and completion checkboxes.
+- Named personal plans and shared community plans on supported multiplayer setups.
+- English and German interface, following the game language.
 
-[![Production graph with material flows, routing buildings and direction arrows](screenshots/Graphenansicht-1.png)](screenshots/Graphenansicht-1.png)
+## Screenshots
 
-Explore the chain from resource sources to final products in a zoomable, pannable graph.
+### Production graph
 
-- Direction arrows show where materials move, including return flows.
-- Material colors and separate connection ports help trace individual streams.
-- Splitters, mergers and pipeline junctions show the planned routing.
-- Parallel transport lines continue from producers to consumers.
-- Completion checkboxes let you track construction within each plan.
+[![Production graph overview](screenshots/Graphenansicht-1.png)](screenshots/Graphenansicht-1.png)
 
-### Inspect machines and individual routes
+[![Machine and route details](screenshots/Graphenansicht-2.png)](screenshots/Graphenansicht-2.png)
 
-[![Detailed graph with route labels, flow rates and modular miner settings](screenshots/Graphenansicht-2.png)](screenshots/Graphenansicht-2.png)
+### Machines
 
-Zoom in to see material names and rates along the routes, transport details and machine settings. Machine nodes show whole machines to build and the clock-speed split, including the final underclocked machine.
+[![Machine overview](screenshots/Uebersicht.png)](screenshots/Uebersicht.png)
 
-The calculation accounts for shared by-products and return flows in the selected chain. Production loops may still need startup material, buffers and controlled return-flow handling.
+### Resources and construction costs
 
-## Review the machine list
+[![Resources and costs](screenshots/Resources.png)](screenshots/Resources.png)
 
-[![Machine overview with build counts, clock speeds and power demand](screenshots/Uebersicht.png)](screenshots/Uebersicht.png)
+### Power planning
 
-The **Machines** tab summarizes final products, machine counts, base power demand and routing buildings. Use the branch-by-branch list to see which machines to build and how to clock them.
+[![Power planning](screenshots/Stromrechner.png)](screenshots/Stromrechner.png)
 
-## Check resources and construction costs
+### In-game terminal
 
-[![Resource availability, demand, transport estimates and construction materials](screenshots/Resources.png)](screenshots/Resources.png)
+[![Planner terminal](screenshots/Modterminal.png)](screenshots/Modterminal.png)
 
-The **Resources & Costs** tab brings together external input demand, resource availability and construction estimates.
-
-Review required materials for machines, belts, pipes and routing buildings. For target-based plans, resource limits can scale all final-product rates proportionally. For plans started from available inputs, edit the inputs and fixed output requests in the **Planning** tab.
-
-## Plan power supply
-
-[![Power supply settings for net output, reserve, generator and operating mode](screenshots/Stromrechner.png)](screenshots/Stromrechner.png)
-
-Set the desired **net power output** and a safety reserve. Choose an available generator and fuel or operating mode, or use automatic selection.
-
-Power planning includes the generation chain, fuel production and its own power consumption. Available generators, components and fuels are read from the active save.
-
-## Save plans and track progress
-
-Save named plans and restore the last active plan. Available-input settings and fixed output requests are saved with input-based plans.
-
-Personal plans remain local. Community plans support server-synchronized planning and construction progress. Completed nodes belong to their plan, so a different plan starts with its own progress.
+Screenshots may show an earlier interface revision or optional mod content.
 
 ## Getting started
 
 1. Install Pioneer Production Planner through Satisfactory Mod Manager.
-2. Load a save and complete the **Factory Planner Terminal** milestone in HUB Tier 1.
-3. Build the floor-standing terminal for **10 Iron Plates** and **20 Cable**.
-4. Interact with it using the normal Use key.
-5. Choose target-based planning or enable **Plan from available inputs**, configure your products and calculate.
+2. Load your save.
+3. Press **F8** by default, or use the planner terminal.
 
-[![Pioneer Production Planner in-game terminal](screenshots/Modterminal.png)](screenshots/Modterminal.png)
-
-You can also open the planner with its configurable hotkey. The default is **F8**; the screenshots use **F9**. Change or disable the hotkey in the planner header.
-
-Available chat commands:
+The hotkey can be changed or disabled in the planner header. To use the terminal, complete the **Factory Planner Terminal** milestone in HUB Tier 1, build it for **10 Iron Plates and 20 Cable**, and interact using the normal Use key.
 
 ```text
 /sfpplanner open
@@ -113,41 +102,40 @@ Available chat commands:
 /sfpplanner hotkey reset
 ```
 
-The interface follows the game language: German for German language settings and English otherwise.
-
 ## Compatibility
 
 | Component | Support |
 | --- | --- |
 | Satisfactory | Game build `>=502094` |
 | Satisfactory Mod Loader | `^3.12.0` required |
-| Vanilla recipes and standard miners | Supported |
-| Compatible content mods | Read dynamically at runtime |
+| Vanilla | Supported |
+| Compatible content mods | Runtime discovery |
 | Satisfactory Plus | Optional |
-| KAPI / KLib Modular Miner integration | Optional |
-| Multiplayer / dedicated servers | Matching planner version required on clients and server |
-| Interface languages | English and German |
+| KAPI / KLib Modular Miner | Optional |
+| Industrial Evolution | Optional compatible Mk.2/Mk.3 production machines |
+| Interface | English and German |
 
-The unlock filter follows the currently loaded save. Optional mod content appears when the mod and its supported runtime data are available.
+Optional content appears only when its mod and required runtime data are available. This does not guarantee compatibility with every machine or recipe from every mod.
 
 ## Planning notes
 
-The graph is a logical production plan, not a three-dimensional factory blueprint. Transport lengths and construction costs are estimates based on the selected average connection length. Actual routes, slopes and factory geometry may require different amounts.
+The graph is a logical production plan, not a three-dimensional blueprint. Transport lengths and construction costs depend on the selected average connection length and remain estimates.
 
-Calculated output depends on the selected recipes, configured sources and a continuous supply of all required inputs. Input-based planning maximizes free outputs within the selected chains; it does not search every possible recipe combination for a global optimum.
+For variable-power recipes, the power total uses approximate cycle averages. Instantaneous peaks can be higher; allow for them when sizing your power supply.
+
+After updating to 1.2.0, recalculate existing plans and save them to refresh machine data and graph labels.
 
 ## Support and bug reports
 
-Please use [GitHub Issues](https://github.com/DerDoesewicht/PioneerProductionPlanner/issues) for reproducible bugs and feature requests.
+Report reproducible bugs and feature requests through [GitHub Issues](https://github.com/DerDoesewicht/PioneerProductionPlanner/issues).
 
-Include:
+Please include:
 
-- Game build, SML version and Pioneer Production Planner version.
+- Game build, SML version and planner version.
 - Installed content mods.
-- Exact reproduction steps and expected behavior.
-- Screenshots of the affected settings or graph.
-- A runtime export from `/sfpplanner export` for missing recipes, miners or incorrect calculations.
-- Relevant game logs or a crash report.
+- Reproduction steps and screenshots.
+- Relevant game/build log or crash report.
+- A runtime export from `/sfpplanner export` for missing recipes, machines or resource sources.
 
 Discord: `derdoesewicht`
 
