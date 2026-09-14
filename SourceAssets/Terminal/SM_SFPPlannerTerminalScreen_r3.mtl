@@ -1,0 +1,8 @@
+# Pioneer Production Planner r17 staging material
+newmtl SFP_R3_ScreenUI
+Ka 0.0 0.0 0.0
+Kd 1.0 1.0 1.0
+Ks 0.1 0.1 0.1
+Ns 16.0
+d 1.0
+illum 2

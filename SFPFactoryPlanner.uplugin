@@ -1,0 +1,36 @@
+{
+	"FileVersion": 3,
+	"Version": 1,
+	"VersionName": "1.3.0",
+	"FriendlyName": "Pioneer Production Planner",
+	"Description": "In-game production and net-power planner for vanilla Satisfactory and modded recipe sets, including Satisfactory Plus.",
+	"Category": "Modding",
+	"CreatedBy": "Doesewicht",
+	"CreatedByURL": "",
+	"DocsURL": "",
+	"MarketplaceURL": "",
+	"SupportURL": "",
+	"CanContainContent": true,
+	"IsBetaVersion": false,
+	"IsExperimentalVersion": false,
+	"Installed": false,
+	"Modules": [
+		{
+			"Name": "SFPFactoryPlanner",
+			"Type": "Runtime",
+			"LoadingPhase": "Default"
+		}
+	],
+	"BuiltInInitialFeatureState": "Active",
+	"Plugins": [
+		{
+			"Name": "SML",
+			"Enabled": true,
+			"SemVersion": "^3.12.0"
+		}
+	],
+	"SemVersion": "1.3.0",
+	"RemoteVersionRange": "1.3.0",
+	"RequiredOnRemote": true,
+	"GameVersion": ">=502094"
+}

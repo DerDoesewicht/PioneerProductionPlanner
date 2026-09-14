@@ -1,0 +1,32 @@
+# Unreal generated files
+Binaries/
+Intermediate/
+Saved/
+DerivedDataCache/
+
+# Packaging
+Packaging/
+StagedBuilds/
+Alpakit/
+
+# IDE
+.vscode/
+.idea/
+
+# Generated binaries / logs
+*.log
+*.pak
+*.ucas
+*.utoc
+*.pdb
+*.dll
+*.so
+
+# Local backup files
+*.backup-*
+*.bak
+*~
+
+# Python cache
+__pycache__/
+*.py[cod]
