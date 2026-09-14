@@ -75,7 +75,10 @@ namespace SFPPlannerWindowPrivate
 			if (PreviousPlan->RequestedNetPowerMW != NewPlan.RequestedNetPowerMW
 				|| PreviousPlan->PowerReservePercent != NewPlan.PowerReservePercent
 				|| PreviousPlan->RequestedGeneratorClassPath != NewPlan.RequestedGeneratorClassPath
-				|| PreviousPlan->RequestedFuelClassPath != NewPlan.RequestedFuelClassPath) return;
+				|| PreviousPlan->RequestedFuelClassPath != NewPlan.RequestedFuelClassPath
+				|| PreviousPlan->ConfiguredGeneratorClockPercent != NewPlan.ConfiguredGeneratorClockPercent
+				|| PreviousPlan->PassiveAlienPowerAugmenters != NewPlan.PassiveAlienPowerAugmenters
+				|| PreviousPlan->FueledAlienPowerAugmenters != NewPlan.FueledAlienPowerAugmenters) return;
 		}
 		else
 		{
@@ -171,6 +174,65 @@ namespace SFPPlannerWindowPrivate
 			*FSFPNumberFormatting::Decimal(PartialPercent, 1));
 	}
 
+
+	FString BuildPowerGeneratorClockingBreakdown(const FSFPPlanResult& Plan)
+	{
+		const double FullClockPercent = Plan.ConfiguredGeneratorClockPercent > KINDA_SMALL_NUMBER
+			? Plan.ConfiguredGeneratorClockPercent : 100.0;
+		if (Plan.PartialGeneratorClockPercent > 0.05)
+		{
+			if (Plan.FullClockGeneratorCount <= 0)
+			{
+				return FString::Printf(TEXT("1 × %s%%"),
+					*FSFPNumberFormatting::Decimal(Plan.PartialGeneratorClockPercent, 1));
+			}
+			return FString::Printf(
+				TEXT("%d × %s%% + 1 × %s%%"),
+				Plan.FullClockGeneratorCount,
+				*FSFPNumberFormatting::Decimal(FullClockPercent, 1),
+				*FSFPNumberFormatting::Decimal(Plan.PartialGeneratorClockPercent, 1));
+		}
+		return FString::Printf(
+			TEXT("%d × %s%%"),
+			Plan.BuiltGeneratorCount,
+			*FSFPNumberFormatting::Decimal(FullClockPercent, 1));
+	}
+
+
+	int32 BuiltMachineCountForNode(const FSFPPlanNode& Node)
+	{
+		return Node.BuiltMachineCount > 0
+			? Node.BuiltMachineCount
+			: FMath::Max(1, FMath::CeilToInt(Node.MachineCount));
+	}
+
+	FString BuildClockingBreakdown(const FSFPPlanNode& Node)
+	{
+		if (Node.BuiltMachineCount <= 0)
+		{
+			return BuildClockingBreakdown(Node.MachineCount);
+		}
+		const double FullClockPercent = Node.ConfiguredClockPercent > KINDA_SMALL_NUMBER
+			? Node.ConfiguredClockPercent
+			: 100.0;
+		if (Node.PartialClockPercent > 0.05)
+		{
+			if (Node.FullClockMachineCount <= 0)
+			{
+				return FString::Printf(TEXT("1 × %s%%"), *FSFPNumberFormatting::Decimal(Node.PartialClockPercent, 1));
+			}
+			return FString::Printf(
+				TEXT("%d × %s%% + 1 × %s%%"),
+				Node.FullClockMachineCount,
+				*FSFPNumberFormatting::Decimal(FullClockPercent, 1),
+				*FSFPNumberFormatting::Decimal(Node.PartialClockPercent, 1));
+		}
+		return FString::Printf(
+			TEXT("%d × %s%%"),
+			Node.BuiltMachineCount,
+			*FSFPNumberFormatting::Decimal(FullClockPercent, 1));
+	}
+
 	FString BuildPlanStatusText(
 		const FSFPPlanResult& Plan,
 		const TOptional<double> SolveMilliseconds = TOptional<double>(),
@@ -190,7 +252,7 @@ namespace SFPPlannerWindowPrivate
 			if ((Node.Type == ESFPPlanNodeType::Machine || Node.Type == ESFPPlanNodeType::Generator)
 				&& Node.MachineCount > 0.0)
 			{
-				BuiltMachineCount += FMath::Max(1, FMath::CeilToInt(Node.MachineCount));
+				BuiltMachineCount += BuiltMachineCountForNode(Node);
 			}
 		}
 		if (Plan.bPowerProductionPlan)
@@ -458,7 +520,7 @@ TSharedRef<SWidget> SSFPPlannerWindow::BuildPlanManagementBar()
 			[
 				SNew(SButton)
 					.Text(this, &SSFPPlannerWindow::GetPlanScopeText)
-					.ToolTipText(SFPLocalization::Text(TEXT("Zwischen persönlichen Client-Plänen und gemeinsamen Serverplänen wechseln")))
+					.ToolTipText(SFPLocalization::Text(TEXT("Zwischen persönlichen Client-Plänen und gemeinsamen Multiplayer-Plänen wechseln")))
 					.OnClicked(this, &SSFPPlannerWindow::HandleTogglePlanScope)
 			]
 			+ SHorizontalBox::Slot()
@@ -583,7 +645,7 @@ TSharedRef<SWidget> SSFPPlannerWindow::BuildPlanningTab()
 	return SNew(SSplitter)
 		.Orientation(Orient_Horizontal)
 		+ SSplitter::Slot()
-		.Value(0.46f)
+		.Value(0.30f)
 		[
 			SNew(SBorder)
 			.BorderImage(FCoreStyle::Get().GetBrush(TEXT("WhiteBrush")))
@@ -750,22 +812,7 @@ TSharedRef<SWidget> SSFPPlannerWindow::BuildPlanningTab()
 						.ColorAndOpacity(SFPTheme::Text)
 					]
 				]
-                + SVerticalBox::Slot().AutoHeight().Padding(0, 6)
-                [ SNew(STextBlock).Text(SFPLocalization::Text(TEXT("PRODUKTIONSMASCHINEN")))
-                  .Font(FCoreStyle::GetDefaultFontStyle(TEXT("Bold"), 10)).ColorAndOpacity(SFPTheme::Orange) ]
-                + SVerticalBox::Slot().AutoHeight().Padding(0, 2, 0, 5)
-                [ SNew(STextBlock).AutoWrapText(true).Text(SFPLocalization::Text(TEXT("1. Endprodukte oder Eingänge festlegen.\n2. Plan berechnen, damit passende Maschinen erscheinen.\n3. Mk.-Stufe wählen.\n4. Erneut berechnen und den Plan speichern."))) ]
-                + SVerticalBox::Slot().AutoHeight().Padding(0, 0, 0, 5)
-                [ SNew(STextBlock).AutoWrapText(true).ColorAndOpacity(SFPTheme::Orange)
-                  .Visibility_Lambda([this]() { return MachineGuidanceState == 0 ? EVisibility::Collapsed : EVisibility::Visible; })
-                  .Text_Lambda([this]() { return SFPLocalization::Text(MachineGuidanceState == 1
-                      ? TEXT("Maschinenauswahl geändert – bitte neu berechnen.")
-                      : MachineGuidanceState == 2 ? TEXT("Plan aktualisiert – zum Behalten speichern.")
-                      : TEXT("Plan gespeichert.")); }) ]
-                + SVerticalBox::Slot().AutoHeight()
-                [ SNew(SBox).MaxDesiredHeight(170)
-                  [ SNew(SScrollBox) + SScrollBox::Slot()
-                    [ SAssignNew(MachineSettingsBox, SVerticalBox) ] ] ]
+
 				+ SVerticalBox::Slot()
 				.AutoHeight()
 				.Padding(0.0f, 7.0f, 0.0f, 3.0f)
@@ -806,7 +853,7 @@ TSharedRef<SWidget> SSFPPlannerWindow::BuildPlanningTab()
 			]
 		]
 		+ SSplitter::Slot()
-		.Value(0.54f)
+		.Value(0.40f)
 		[
 			SNew(SBorder)
 			.BorderImage(FCoreStyle::Get().GetBrush(TEXT("WhiteBrush")))
@@ -872,7 +919,65 @@ TSharedRef<SWidget> SSFPPlannerWindow::BuildPlanningTab()
 					]
 				]
 			]
-		];
+		]
+		+ SSplitter::Slot()
+		.Value(0.30f)
+		[
+			SNew(SBorder)
+			.BorderImage(FCoreStyle::Get().GetBrush(TEXT("WhiteBrush")))
+			.BorderBackgroundColor(SFPTheme::Panel)
+			.Padding(12.0f)
+			[
+				SNew(SVerticalBox)
+				+ SVerticalBox::Slot()
+				.AutoHeight()
+				.Padding(0.0f, 0.0f, 0.0f, 5.0f)
+				[
+					SNew(STextBlock)
+					.Text(SFPLocalization::Text(TEXT("MASCHINENEINSTELLUNGEN")))
+					.Font(FCoreStyle::GetDefaultFontStyle(TEXT("Bold"), 13))
+					.ColorAndOpacity(SFPTheme::Yellow)
+				]
+				+ SVerticalBox::Slot()
+				.AutoHeight()
+				.Padding(0.0f, 0.0f, 0.0f, 5.0f)
+				[
+					SNew(STextBlock)
+					.AutoWrapText(true)
+					.ColorAndOpacity(SFPTheme::MutedText)
+					.Text(SFPLocalization::Text(TEXT("Maschinenvariante, Takt, Somersloops und Brennstoff werden pro Produktionsstufe eingestellt.")))
+				]
+				+ SVerticalBox::Slot()
+				.AutoHeight()
+				.Padding(0.0f, 0.0f, 0.0f, 6.0f)
+				[
+					SNew(STextBlock)
+					.AutoWrapText(true)
+					.ColorAndOpacity(SFPTheme::Orange)
+					.Visibility_Lambda([this]() { return MachineGuidanceState == 0 ? EVisibility::Collapsed : EVisibility::Visible; })
+					.Text_Lambda([this]() { return SFPLocalization::Text(MachineGuidanceState == 1
+						? TEXT("Maschineneinstellung geändert – bitte neu berechnen.")
+						: MachineGuidanceState == 2 ? TEXT("Plan aktualisiert – zum Behalten speichern.")
+						: TEXT("Plan gespeichert.")); })
+				]
+				+ SVerticalBox::Slot()
+				.FillHeight(1.0f)
+				[
+					SNew(SBorder)
+					.BorderImage(FCoreStyle::Get().GetBrush(TEXT("WhiteBrush")))
+					.BorderBackgroundColor(SFPTheme::Header)
+					.Padding(6.0f)
+					[
+						SNew(SScrollBox)
+						+ SScrollBox::Slot()
+						[
+							SAssignNew(MachineSettingsBox, SVerticalBox)
+						]
+					]
+				]
+			]
+		]
+		;
 }
 
 TSharedRef<SWidget> SSFPPlannerWindow::BuildPowerTab()
@@ -952,6 +1057,76 @@ TSharedRef<SWidget> SSFPPlannerWindow::BuildPowerTab()
 				]
 				+ SVerticalBox::Slot()
 				.AutoHeight()
+				.Padding(0.0f, 2.0f, 0.0f, 3.0f)
+				[
+					SNew(STextBlock)
+					.Text(SFPLocalization::Text(TEXT("ALIEN POWER AUGMENTER")))
+					.Font(FCoreStyle::GetDefaultFontStyle(TEXT("Bold"), 10))
+					.ColorAndOpacity(SFPTheme::Orange)
+				]
+				+ SVerticalBox::Slot()
+				.AutoHeight()
+				.Padding(0.0f, 0.0f, 0.0f, 4.0f)
+				[
+					SNew(STextBlock)
+					.Text(SFPLocalization::Text(TEXT("Augmenter werden als Teil desselben Stromnetzes berechnet. Mit Matrix versorgte Augmenter planen zusätzlich den Matrix-Bedarf und dessen Produktionskette.")))
+					.AutoWrapText(true)
+					.ColorAndOpacity(SFPTheme::MutedText)
+				]
+				+ SVerticalBox::Slot()
+				.AutoHeight()
+				.Padding(0.0f, 0.0f, 0.0f, 4.0f)
+				[
+					SNew(SHorizontalBox)
+					+ SHorizontalBox::Slot()
+					.FillWidth(0.56f)
+					.VAlign(VAlign_Center)
+					[
+						SNew(STextBlock)
+						.Text(SFPLocalization::Text(TEXT("Passiv (+Basisleistung / Netzboost)")))
+						.ColorAndOpacity(SFPTheme::Text)
+					]
+					+ SHorizontalBox::Slot()
+					.FillWidth(0.44f)
+					[
+						SNew(SNumericEntryBox<int32>)
+						.AllowSpin(true)
+						.MinValue(0)
+						.MaxValue(10000)
+						.MinSliderValue(0)
+						.MaxSliderValue(20)
+						.Value(this, &SSFPPlannerWindow::GetPassiveAlienPowerAugmenters)
+						.OnValueChanged(this, &SSFPPlannerWindow::HandlePassiveAlienPowerAugmentersChanged)
+					]
+				]
+				+ SVerticalBox::Slot()
+				.AutoHeight()
+				.Padding(0.0f, 0.0f, 0.0f, 10.0f)
+				[
+					SNew(SHorizontalBox)
+					+ SHorizontalBox::Slot()
+					.FillWidth(0.56f)
+					.VAlign(VAlign_Center)
+					[
+						SNew(STextBlock)
+						.Text(SFPLocalization::Text(TEXT("Mit Alien Power Matrix versorgt")))
+						.ColorAndOpacity(SFPTheme::Text)
+					]
+					+ SHorizontalBox::Slot()
+					.FillWidth(0.44f)
+					[
+						SNew(SNumericEntryBox<int32>)
+						.AllowSpin(true)
+						.MinValue(0)
+						.MaxValue(10000)
+						.MinSliderValue(0)
+						.MaxSliderValue(20)
+						.Value(this, &SSFPPlannerWindow::GetFueledAlienPowerAugmenters)
+						.OnValueChanged(this, &SSFPPlannerWindow::HandleFueledAlienPowerAugmentersChanged)
+					]
+				]
+				+ SVerticalBox::Slot()
+				.AutoHeight()
 				.Padding(0.0f, 0.0f, 0.0f, 10.0f)
 				[
 					SNew(SCheckBox)
@@ -985,6 +1160,46 @@ TSharedRef<SWidget> SSFPPlannerWindow::BuildPowerTab()
 						.Text(this, &SSFPPlannerWindow::GetSelectedPowerGeneratorText)
 						.ColorAndOpacity(SFPTheme::Text)
 					]
+				]
+				+ SVerticalBox::Slot()
+				.AutoHeight()
+				.Padding(0.0f, 0.0f, 0.0f, 3.0f)
+				[
+					SNew(STextBlock)
+					.Text(SFPLocalization::Text(TEXT("GENERATOR-TAKT (%)")))
+					.ColorAndOpacity(SFPTheme::MutedText)
+				]
+				+ SVerticalBox::Slot()
+				.AutoHeight()
+				.Padding(0.0f, 0.0f, 0.0f, 4.0f)
+				[
+					SNew(SNumericEntryBox<double>)
+					.AllowSpin(true)
+					.MinValue(this, &SSFPPlannerWindow::GetPowerGeneratorMinClockPercent)
+					.MaxValue(this, &SSFPPlannerWindow::GetPowerGeneratorMaxClockPercent)
+					.MinSliderValue(this, &SSFPPlannerWindow::GetPowerGeneratorMinClockPercent)
+					.MaxSliderValue(this, &SSFPPlannerWindow::GetPowerGeneratorMaxClockPercent)
+					.Value(this, &SSFPPlannerWindow::GetPowerGeneratorClockPercent)
+					.OnValueChanged(this, &SSFPPlannerWindow::HandlePowerGeneratorClockPercentChanged)
+				]
+				+ SVerticalBox::Slot()
+				.AutoHeight()
+				.Padding(0.0f, 0.0f, 0.0f, 10.0f)
+				[
+					SNew(STextBlock)
+					.Text_Lambda([this]()
+					{
+						const double Clock = PowerGeneratorClockPercent;
+						const double BaseMW = SelectedPowerGenerator.IsValid()
+							? SelectedPowerGenerator->PowerProductionMW : 0.0;
+						const FString Detail = BaseMW > KINDA_SMALL_NUMBER
+							? FString::Printf(TEXT("%s MW je voll getaktetem Generator. Stromgeneratoren können übertaktet, aber nicht mit Somersloops verstärkt werden."),
+								*FSFPNumberFormatting::Decimal(BaseMW * Clock / 100.0, 2))
+							: TEXT("Stromgeneratoren können übertaktet, aber nicht mit Somersloops verstärkt werden.");
+						return SFPLocalization::Text(Detail);
+					})
+					.AutoWrapText(true)
+					.ColorAndOpacity(SFPTheme::MutedText)
 				]
 				+ SVerticalBox::Slot()
 				.AutoHeight()
@@ -1564,6 +1779,14 @@ void SSFPPlannerWindow::HandlePowerGeneratorSelected(
 	const ESelectInfo::Type SelectInfo)
 {
 	SelectedPowerGenerator = MoveTemp(Choice);
+	if (SelectedPowerGenerator.IsValid())
+	{
+		const TOptional<double> MinClockValue = GetPowerGeneratorMinClockPercent();
+		const TOptional<double> MaxClockValue = GetPowerGeneratorMaxClockPercent();
+		const double MinClock = MinClockValue.IsSet() ? MinClockValue.GetValue() : 1.0;
+		const double MaxClock = MaxClockValue.IsSet() ? MaxClockValue.GetValue() : 250.0;
+		PowerGeneratorClockPercent = FMath::Clamp(PowerGeneratorClockPercent, MinClock, MaxClock);
+	}
 	if (SelectInfo == ESelectInfo::Direct)
 	{
 		return;
@@ -1867,7 +2090,11 @@ FReply SSFPPlannerWindow::HandleCalculatePower()
 	Request.bOnlyAvailable = bOnlyAvailable;
 	Request.GeneratorClassPath = SelectedPowerGenerator->ClassPath;
 	Request.FuelClassPath = SelectedPowerFuel->ClassPath;
+	Request.GeneratorClockPercent = PowerGeneratorClockPercent;
+	Request.PassiveAlienPowerAugmenters = PassiveAlienPowerAugmenters;
+	Request.FueledAlienPowerAugmenters = FueledAlienPowerAugmenters;
 	Request.RecipeOverrides = RecipeOverrides;
+	Request.MachineSettings = MachineSettingsOverrides;
 	Request.EstimatedConnectionLengthMeters = EstimatedConnectionLengthMeters;
 	Request.SelectedConveyorClassPath = SelectedConveyor->Tier.ClassPath;
 	Request.SelectedConveyorLiftClassPath = SelectedConveyorLift->Tier.ClassPath;
@@ -1942,7 +2169,10 @@ void SSFPPlannerWindow::CalculateForTargets(
 		RecipeOverrides,
 		EstimatedConnectionLengthMeters,
 		SelectedConveyor.IsValid() ? SelectedConveyor->Tier.ClassPath : FString(),
-		SelectedConveyorLift.IsValid() ? SelectedConveyorLift->Tier.ClassPath : FString()));
+		SelectedConveyorLift.IsValid() ? SelectedConveyorLift->Tier.ClassPath : FString(),
+		TMap<FString, double>(),
+		true,
+		MachineSettingsOverrides));
 	const double SolveMilliseconds = (FPlatformTime::Seconds() - SolveStartTime) * 1000.0;
 	if (!Plan->bSuccess)
 	{
@@ -1998,11 +2228,13 @@ void SSFPPlannerWindow::RefreshRecipeChoices(const TSharedPtr<FSFPPlanResult>& P
 		}
 		TArray<int32> PendingNodes;
 		TMap<int32, TArray<int32>> Suppliers;
+		TMap<int32, TArray<int32>> Consumers;
 		for (const FSFPPlanEdge& Edge : Plan->Edges)
 		{
 			if (Edge.RatePerMinute > KINDA_SMALL_NUMBER)
 			{
 				Suppliers.FindOrAdd(Edge.TargetNodeId).Add(Edge.SourceNodeId);
+				Consumers.FindOrAdd(Edge.SourceNodeId).Add(Edge.TargetNodeId);
 			}
 		}
 		for (const FSFPPlanNode& Node : Plan->Nodes)
@@ -2039,6 +2271,7 @@ void SSFPPlannerWindow::RefreshRecipeChoices(const TSharedPtr<FSFPPlanResult>& P
 			}
 			SeenItems.Add(Node.ProducedItemClassPath);
 			TSharedPtr<FSFPRecipeChoiceRow> Row = MakeShared<FSFPRecipeChoiceRow>();
+			Row->PlanNodeId = Node.Id;
 			Row->ItemClassPath = Node.ProducedItemClassPath;
 			Solver->GetRecipeOptionsForItemPath(Row->ItemClassPath, bOnlyAvailable, Row->Options);
             if (bInputPlanning) Row->Options.RemoveAll([this](const TSharedPtr<FSFPRecipeOption>& O) {
@@ -2085,6 +2318,54 @@ void SSFPPlannerWindow::RefreshRecipeChoices(const TSharedPtr<FSFPPlanResult>& P
 			}
 			RecipeChoiceRows.Add(MoveTemp(Row));
 		}
+
+		// A separately processed material and its one-use raw extraction are one
+		// user decision. Keep both solver overrides independent, but render the raw
+		// miner controls inside the immediate processing card instead of presenting
+		// two near-duplicate cards such as Crushed Siderite and Siderite Ore.
+		TMap<int32, TSharedPtr<FSFPRecipeChoiceRow>> RowsByNodeId;
+		for (const TSharedPtr<FSFPRecipeChoiceRow>& Row : RecipeChoiceRows)
+		{
+			if (Row.IsValid()) RowsByNodeId.Add(Row->PlanNodeId, Row);
+		}
+		TSet<int32> GroupedRawNodeIds;
+		for (const TSharedPtr<FSFPRecipeChoiceRow>& ProcessingRow : RecipeChoiceRows)
+		{
+			if (!ProcessingRow.IsValid() || !ProcessingRow->Selected.IsValid()
+				|| ProcessingRow->Selected->Category == TEXT("Direktabbau / Förderung"))
+			{
+				continue;
+			}
+			const TArray<int32>* DirectSuppliers = Suppliers.Find(ProcessingRow->PlanNodeId);
+			if (DirectSuppliers == nullptr) continue;
+			for (const int32 SupplierNodeId : *DirectSuppliers)
+			{
+				const TSharedPtr<FSFPRecipeChoiceRow>* RawRow = RowsByNodeId.Find(SupplierNodeId);
+				const TArray<int32>* RawConsumers = Consumers.Find(SupplierNodeId);
+				if (RawRow == nullptr || !RawRow->IsValid() || !(*RawRow)->Selected.IsValid()
+					|| (*RawRow)->Selected->Category != TEXT("Direktabbau / Förderung")
+					|| (*RawRow)->Selected->bProcessesResource
+					|| RawConsumers == nullptr || RawConsumers->Num() != 1
+					|| GroupedRawNodeIds.Contains(SupplierNodeId))
+				{
+					continue;
+				}
+				ProcessingRow->GroupedRawExtractions.Add(*RawRow);
+				GroupedRawNodeIds.Add(SupplierNodeId);
+			}
+			ProcessingRow->GroupedRawExtractions.Sort([](
+				const TSharedPtr<FSFPRecipeChoiceRow>& Left,
+				const TSharedPtr<FSFPRecipeChoiceRow>& Right)
+			{
+				return Left.IsValid() && Right.IsValid()
+					? Left->ItemName.Compare(Right->ItemName, ESearchCase::IgnoreCase) < 0
+					: Left.IsValid();
+			});
+		}
+		RecipeChoiceRows.RemoveAll([&GroupedRawNodeIds](const TSharedPtr<FSFPRecipeChoiceRow>& Row)
+		{
+			return Row.IsValid() && GroupedRawNodeIds.Contains(Row->PlanNodeId);
+		});
 		RecipeChoiceRows.Sort([&EndProductPaths](const TSharedPtr<FSFPRecipeChoiceRow>& Left, const TSharedPtr<FSFPRecipeChoiceRow>& Right)
 		{
 			if (Left.IsValid() && Right.IsValid()
@@ -2106,73 +2387,343 @@ void SSFPPlannerWindow::RefreshRecipeChoices(const TSharedPtr<FSFPPlanResult>& P
 
 void SSFPPlannerWindow::RefreshMachineSettings()
 {
-    if (!MachineSettingsBox.IsValid()) return;
-    MachineSettingsBox->ClearChildren();
-    // Group only rows with the same compatible machine set. Each row retains its recipe.
-    TMap<FString, TArray<TSharedPtr<FSFPRecipeChoiceRow>>> Groups;
-    TMap<FString, TArray<FString>> Names;
-    for (const auto& Row : RecipeChoiceRows)
-    {
-        if (!Row.IsValid() || !Row->Selected.IsValid()
-            || Row->Selected->Category == TEXT("Direktabbau / Förderung")) continue;
-        TArray<FString> Machines;
-        for (const auto& Option : Row->Options)
-            if (Option.IsValid() && Option->DisplayName == Row->Selected->DisplayName
-                && Option->Category == Row->Selected->Category && !Option->MachineName.IsEmpty())
-                Machines.AddUnique(Option->MachineName);
-        if (Machines.Num() < 2) continue;
-        Machines.Sort();
-        const FString Key = FString::Join(Machines, TEXT("|"));
-        Groups.FindOrAdd(Key).Add(Row);
-        Names.Add(Key, Machines);
-    }
-    if (Groups.IsEmpty())
-    {
-        MachineSettingsBox->AddSlot().AutoHeight()
-        [ SNew(STextBlock).AutoWrapText(true).Text(SFPLocalization::Text(
-            TEXT("Nach der Berechnung erscheinen hier die verfügbaren Maschinenvarianten des Plans."))) ];
-        return;
-    }
-    TArray<FString> Keys;
-    Groups.GetKeys(Keys);
-    Keys.Sort();
-    for (const FString& Key : Keys)
-    {
-        const auto Rows = Groups[Key];
-        auto Values = MakeShared<TArray<TSharedPtr<FString>>>();
-        for (const auto& Name : Names[Key]) Values->Add(MakeShared<FString>(Name));
-        MachineSettingsBox->AddSlot().AutoHeight().Padding(0, 2)
-        [ SNew(STextBlock).Text(SFPLocalization::Text(Names[Key][0])) ];
-        MachineSettingsBox->AddSlot().AutoHeight().Padding(0, 0, 0, 5)
-        [ SNew(SComboBox<TSharedPtr<FString>>).OptionsSource(&Values.Get()).MaxListHeight(260)
-          .OnGenerateWidget_Lambda([](TSharedPtr<FString> Value)
-          { return StaticCastSharedRef<SWidget>(SNew(STextBlock).Text(SFPLocalization::Text(*Value))); })
-          .OnSelectionChanged_Lambda([this, Rows, Values](TSharedPtr<FString> Value, ESelectInfo::Type Info)
-          {
-              if (Info == ESelectInfo::Direct || !Value.IsValid()) return;
-              for (const auto& Row : Rows)
-                  for (const auto& Option : Row->Options)
-                      if (Option.IsValid() && Option->MachineName == *Value
-                          && Option->DisplayName == Row->Selected->DisplayName
-                          && Option->Category == Row->Selected->Category)
-                      {
-                          Row->Selected = Option;
-                          RecipeOverrides.Add(Row->ItemClassPath, Option->RecipeClassPath);
-                          break;
-                      }
-              MachineGuidanceState = 1;
-              StatusText = TEXT("Maschinenauswahl geändert – bitte neu berechnen.");
-              if (RecipeChoiceList.IsValid()) RecipeChoiceList->RebuildList();
-          })
-          [ SNew(STextBlock).Text_Lambda([Rows]()
-            {
-                const FString Machine = Rows[0]->Selected->MachineName;
-                for (const auto& Row : Rows)
-                    if (Row->Selected->MachineName != Machine)
-                        return SFPLocalization::Text(TEXT("Unterschiedliche Maschinen"));
-                return SFPLocalization::Text(Machine);
-            }) ] ];
-    }
+	if (!MachineSettingsBox.IsValid())
+	{
+		return;
+	}
+	MachineSettingsBox->ClearChildren();
+	TArray<TSharedPtr<FSFPRecipeChoiceRow>> AllRecipeRows = RecipeChoiceRows;
+	for (const TSharedPtr<FSFPRecipeChoiceRow>& Row : RecipeChoiceRows)
+	{
+		if (Row.IsValid()) AllRecipeRows.Append(Row->GroupedRawExtractions);
+	}
+
+	// Keep the existing machine-variant selector. Rows are grouped only when the
+	// same recipe can run in more than one compatible machine variant.
+	TMap<FString, TArray<TSharedPtr<FSFPRecipeChoiceRow>>> Groups;
+	TMap<FString, TArray<FString>> Names;
+	for (const TSharedPtr<FSFPRecipeChoiceRow>& Row : AllRecipeRows)
+	{
+		if (!Row.IsValid() || !Row->Selected.IsValid()
+			|| Row->Selected->Category == TEXT("Direktabbau / Förderung"))
+		{
+			continue;
+		}
+		TArray<FString> Machines;
+		for (const TSharedPtr<FSFPRecipeOption>& Option : Row->Options)
+		{
+			if (Option.IsValid()
+				&& Option->DisplayName == Row->Selected->DisplayName
+				&& Option->Category == Row->Selected->Category
+				&& !Option->MachineName.IsEmpty())
+			{
+				Machines.AddUnique(Option->MachineName);
+			}
+		}
+		if (Machines.Num() < 2)
+		{
+			continue;
+		}
+		Machines.Sort();
+		const FString Key = FString::Join(Machines, TEXT("|"));
+		Groups.FindOrAdd(Key).Add(Row);
+		Names.Add(Key, Machines);
+	}
+
+	TArray<FString> GroupKeys;
+	Groups.GetKeys(GroupKeys);
+	GroupKeys.Sort();
+	for (const FString& Key : GroupKeys)
+	{
+		const TArray<TSharedPtr<FSFPRecipeChoiceRow>> Rows = Groups[Key];
+		auto Values = MakeShared<TArray<TSharedPtr<FString>>>();
+		for (const FString& Name : Names[Key])
+		{
+			Values->Add(MakeShared<FString>(Name));
+		}
+		MachineSettingsBox->AddSlot().AutoHeight().Padding(0, 2)
+		[
+			SNew(STextBlock)
+			.Text(SFPLocalization::Text(TEXT("Maschinenvariante")))
+		];
+		MachineSettingsBox->AddSlot().AutoHeight().Padding(0, 0, 0, 7)
+		[
+			SNew(SComboBox<TSharedPtr<FString>>)
+			.OptionsSource(&Values.Get())
+			.MaxListHeight(260)
+			.OnGenerateWidget_Lambda([](TSharedPtr<FString> Value)
+			{
+				return StaticCastSharedRef<SWidget>(SNew(STextBlock).Text(Value.IsValid()
+					? SFPLocalization::Text(*Value)
+					: FText::GetEmpty()));
+			})
+			.OnSelectionChanged_Lambda([this, Rows, Values](TSharedPtr<FString> Value, ESelectInfo::Type Info)
+			{
+				if (Info == ESelectInfo::Direct || !Value.IsValid())
+				{
+					return;
+				}
+				for (const TSharedPtr<FSFPRecipeChoiceRow>& Row : Rows)
+				{
+					if (!Row.IsValid() || !Row->Selected.IsValid()) continue;
+					for (const TSharedPtr<FSFPRecipeOption>& Option : Row->Options)
+					{
+						if (Option.IsValid()
+							&& Option->MachineName == *Value
+							&& Option->DisplayName == Row->Selected->DisplayName
+							&& Option->Category == Row->Selected->Category)
+						{
+							Row->Selected = Option;
+							RecipeOverrides.Add(Row->ItemClassPath, Option->RecipeClassPath);
+							break;
+						}
+					}
+				}
+				MachineGuidanceState = 1;
+				bCarryCurrentPlanProgress = false;
+				StatusText = TEXT("Maschinenauswahl geändert – bitte neu berechnen.");
+				if (RecipeChoiceList.IsValid()) RecipeChoiceList->RebuildList();
+				RefreshMachineSettings();
+			})
+			[
+				SNew(STextBlock).Text_Lambda([Rows]()
+				{
+					if (Rows.IsEmpty() || !Rows[0].IsValid() || !Rows[0]->Selected.IsValid()) return FText::GetEmpty();
+					const FString Machine = Rows[0]->Selected->MachineName;
+					for (const TSharedPtr<FSFPRecipeChoiceRow>& Row : Rows)
+					{
+						if (Row.IsValid() && Row->Selected.IsValid() && Row->Selected->MachineName != Machine)
+						{
+							return SFPLocalization::Text(TEXT("Unterschiedliche Maschinen"));
+						}
+					}
+					return SFPLocalization::Text(Machine);
+				})
+			]
+		];
+	}
+
+	// One operating-point editor per selected runtime recipe variant. This is
+	// generic for vanilla, Satisfactory Plus and other manufacturer subclasses.
+	TArray<TSharedPtr<FSFPRecipeOption>> OperatingOptions;
+	TSet<FString> SeenRecipePaths;
+	for (const TSharedPtr<FSFPRecipeChoiceRow>& Row : AllRecipeRows)
+	{
+		if (!Row.IsValid() || !Row->Selected.IsValid()) continue;
+		const TSharedPtr<FSFPRecipeOption>& Option = Row->Selected;
+		if (Option->RecipeClassPath.IsEmpty() || Option->MachineName.IsEmpty()
+			|| SeenRecipePaths.Contains(Option->RecipeClassPath))
+		{
+			continue;
+		}
+		const bool bHasOperatingControls = Option->MachineConfig.bCanChangePotential
+			|| Option->MachineConfig.bCanChangeProductionBoost
+			|| Option->bFuelPowered;
+		if (!bHasOperatingControls)
+		{
+			continue;
+		}
+		SeenRecipePaths.Add(Option->RecipeClassPath);
+		OperatingOptions.Add(Option);
+	}
+	OperatingOptions.Sort([](const TSharedPtr<FSFPRecipeOption>& Left, const TSharedPtr<FSFPRecipeOption>& Right)
+	{
+		if (!Left.IsValid()) return false;
+		if (!Right.IsValid()) return true;
+		const int32 MachineOrder = Left->MachineName.Compare(Right->MachineName, ESearchCase::IgnoreCase);
+		return MachineOrder == 0
+			? Left->DisplayName.Compare(Right->DisplayName, ESearchCase::IgnoreCase) < 0
+			: MachineOrder < 0;
+	});
+
+	if (OperatingOptions.IsEmpty() && Groups.IsEmpty())
+	{
+		MachineSettingsBox->AddSlot().AutoHeight()
+		[
+			SNew(STextBlock)
+			.AutoWrapText(true)
+			.Text(SFPLocalization::Text(
+				TEXT("Nach der Berechnung erscheinen hier Maschinenvarianten, Taktung und Produktionsverstärkung des Plans.")))
+		];
+		return;
+	}
+
+	for (const TSharedPtr<FSFPRecipeOption>& Option : OperatingOptions)
+	{
+		if (!Option.IsValid()) continue;
+		const FString SettingsKey = Option->RecipeClassPath;
+		FSFPMachinePlanSettings& Settings = MachineSettingsOverrides.FindOrAdd(SettingsKey);
+		if (!FMath::IsFinite(Settings.ClockPercent) || Settings.ClockPercent <= 0.0)
+		{
+			Settings.ClockPercent = 100.0;
+		}
+
+		MachineSettingsBox->AddSlot().AutoHeight().Padding(0, 8, 0, 2)
+		[
+			SNew(STextBlock)
+			.Text(FText::FromString(FString::Printf(TEXT("%s · %s"), *Option->MachineName, *Option->DisplayName)))
+			.Font(FCoreStyle::GetDefaultFontStyle(TEXT("Bold"), 10))
+		];
+
+		if (Option->MachineConfig.bCanChangePotential)
+		{
+			const double MinClockPercent = FMath::Max(0.1, Option->MachineConfig.MinPotential * 100.0);
+			const TOptional<double> MaxClockPercent = Option->MachineConfig.bRuntimeMaxPotentialKnown
+				? TOptional<double>(Option->MachineConfig.MaxPotential * 100.0)
+				: TOptional<double>();
+			MachineSettingsBox->AddSlot().AutoHeight().Padding(0, 1)
+			[
+				SNew(SHorizontalBox)
+				+ SHorizontalBox::Slot().FillWidth(0.48f).VAlign(VAlign_Center)
+				[
+					SNew(STextBlock)
+					.Text(SFPLocalization::Text(TEXT("Takt (%)")))
+					.ToolTipText(SFPLocalization::Text(TEXT("Der Solver füllt Maschinen bis zu diesem Takt und untertaktet nur die letzte Maschine passend zum Bedarf.")))
+				]
+				+ SHorizontalBox::Slot().FillWidth(0.52f)
+				[
+					SNew(SNumericEntryBox<double>)
+					.AllowSpin(true)
+					.MinValue(MinClockPercent)
+					.MaxValue(MaxClockPercent)
+					.MinSliderValue(MinClockPercent)
+					.MaxSliderValue(MaxClockPercent)
+					.Value_Lambda([this, SettingsKey]() -> TOptional<double>
+					{
+						const FSFPMachinePlanSettings* Current = MachineSettingsOverrides.Find(SettingsKey);
+						return Current != nullptr ? TOptional<double>(Current->ClockPercent) : TOptional<double>(100.0);
+					})
+					.OnValueChanged_Lambda([this, SettingsKey, MinClockPercent, MaxClockPercent](const double NewValue)
+					{
+						if (!FMath::IsFinite(NewValue)) return;
+						FSFPMachinePlanSettings& Current = MachineSettingsOverrides.FindOrAdd(SettingsKey);
+						Current.ClockPercent = FMath::Max(MinClockPercent, NewValue);
+						if (MaxClockPercent.IsSet()) Current.ClockPercent = FMath::Min(Current.ClockPercent, MaxClockPercent.GetValue());
+						MachineGuidanceState = 1;
+						bCarryCurrentPlanProgress = false;
+						StatusText = TEXT("Taktung geändert – bitte Produktionsplan neu berechnen.");
+					})
+				]
+			];
+		}
+
+		if (Option->MachineConfig.bCanChangeProductionBoost
+			&& Option->MachineConfig.ProductionBoostPerSloop > KINDA_SMALL_NUMBER)
+		{
+			const int32 MaxSloops = Option->MachineConfig.bRuntimeMaxProductionBoostKnown
+				? FMath::Max(0, Option->MachineConfig.MaxSomersloops)
+				: 64;
+			MachineSettingsBox->AddSlot().AutoHeight().Padding(0, 1)
+			[
+				SNew(SHorizontalBox)
+				+ SHorizontalBox::Slot().FillWidth(0.48f).VAlign(VAlign_Center)
+				[
+					SNew(STextBlock)
+					.Text(SFPLocalization::Text(TEXT("Sloops / Maschine")))
+				]
+				+ SHorizontalBox::Slot().FillWidth(0.52f)
+				[
+					SNew(SNumericEntryBox<int32>)
+					.AllowSpin(true)
+					.MinValue(0)
+					.MaxValue(MaxSloops)
+					.MinSliderValue(0)
+					.MaxSliderValue(MaxSloops)
+					.Value_Lambda([this, SettingsKey]() -> TOptional<int32>
+					{
+						const FSFPMachinePlanSettings* Current = MachineSettingsOverrides.Find(SettingsKey);
+						return Current != nullptr ? TOptional<int32>(Current->SomersloopCount) : TOptional<int32>(0);
+					})
+					.OnValueChanged_Lambda([this, SettingsKey, MaxSloops](const int32 NewValue)
+					{
+						FSFPMachinePlanSettings& Current = MachineSettingsOverrides.FindOrAdd(SettingsKey);
+						Current.SomersloopCount = FMath::Clamp(NewValue, 0, MaxSloops);
+						MachineGuidanceState = 1;
+						bCarryCurrentPlanProgress = false;
+						StatusText = TEXT("Somersloop-Einstellung geändert – bitte Produktionsplan neu berechnen.");
+					})
+				]
+			];
+
+			MachineSettingsBox->AddSlot().AutoHeight().Padding(0, 0, 0, 2)
+			[
+				SNew(STextBlock)
+				.ColorAndOpacity(SFPTheme::MutedText)
+				.Text_Lambda([this, SettingsKey, Option]()
+				{
+					const FSFPMachinePlanSettings* Current = MachineSettingsOverrides.Find(SettingsKey);
+					const int32 Count = Current != nullptr ? Current->SomersloopCount : 0;
+					double Boost = Option->MachineConfig.BaseProductionBoost
+						+ static_cast<double>(Count) * Option->MachineConfig.ProductionBoostPerSloop;
+					if (Option->MachineConfig.bRuntimeMaxProductionBoostKnown)
+					{
+						Boost = FMath::Min(Boost, Option->MachineConfig.MaxProductionBoost);
+					}
+					return SFPLocalization::Text(FString::Printf(
+						TEXT("Boost: x%s · Power-Exponent: %s"),
+						*FSFPNumberFormatting::Decimal(Boost, 2),
+						*FSFPNumberFormatting::Decimal(Option->MachineConfig.ProductionBoostPowerExponent, 3)));
+				})
+			];
+		}
+
+		if (Option->bFuelPowered && !Option->FuelOptions.IsEmpty())
+		{
+			auto Fuels = MakeShared<TArray<TSharedPtr<FSFPPlannerFuelOption>>>();
+			TSharedPtr<FSFPPlannerFuelOption> AutomaticFuel = MakeShared<FSFPPlannerFuelOption>();
+			AutomaticFuel->DisplayName = TEXT("Automatisch");
+			Fuels->Add(AutomaticFuel);
+			for (const FSFPPlannerFuelOption& Fuel : Option->FuelOptions)
+			{
+				Fuels->Add(MakeShared<FSFPPlannerFuelOption>(Fuel));
+			}
+			MachineSettingsBox->AddSlot().AutoHeight().Padding(0, 1, 0, 6)
+			[
+				SNew(SHorizontalBox)
+				+ SHorizontalBox::Slot().FillWidth(0.48f).VAlign(VAlign_Center)
+				[
+					SNew(STextBlock).Text(SFPLocalization::Text(TEXT("Brennstoff")))
+				]
+				+ SHorizontalBox::Slot().FillWidth(0.52f)
+				[
+					SNew(SComboBox<TSharedPtr<FSFPPlannerFuelOption>>)
+					.OptionsSource(&Fuels.Get())
+					.MaxListHeight(300.0f)
+					.OnGenerateWidget_Lambda([](TSharedPtr<FSFPPlannerFuelOption> Fuel)
+					{
+						if (!Fuel.IsValid()) return StaticCastSharedRef<SWidget>(SNew(STextBlock));
+						const FString Label = Fuel->ClassPath.IsEmpty()
+							? Fuel->DisplayName
+							: FString::Printf(TEXT("%s · %s MJ"), *Fuel->DisplayName, *FSFPNumberFormatting::Decimal(Fuel->EnergyValueMJ, 1));
+						return StaticCastSharedRef<SWidget>(SNew(STextBlock).Text(FText::FromString(Label)));
+					})
+					.OnSelectionChanged_Lambda([this, SettingsKey, Fuels](TSharedPtr<FSFPPlannerFuelOption> Fuel, ESelectInfo::Type Info)
+					{
+						if (Info == ESelectInfo::Direct || !Fuel.IsValid()) return;
+						MachineSettingsOverrides.FindOrAdd(SettingsKey).FuelClassPath = Fuel->ClassPath;
+						MachineGuidanceState = 1;
+						bCarryCurrentPlanProgress = false;
+						StatusText = TEXT("Brennstoff geändert – bitte Produktionsplan neu berechnen.");
+					})
+					[
+						SNew(STextBlock).Text_Lambda([this, SettingsKey, Fuels]()
+						{
+							const FSFPMachinePlanSettings* Current = MachineSettingsOverrides.Find(SettingsKey);
+							const FString SelectedPath = Current != nullptr ? Current->FuelClassPath : FString();
+							for (const TSharedPtr<FSFPPlannerFuelOption>& Fuel : *Fuels)
+							{
+								if (Fuel.IsValid() && Fuel->ClassPath == SelectedPath)
+								{
+									return SFPLocalization::Text(Fuel->DisplayName);
+								}
+							}
+							return SFPLocalization::Text(TEXT("Automatisch"));
+						})
+					]
+				]
+			];
+		}
+	}
 }
 
 TSharedRef<ITableRow> SSFPPlannerWindow::HandleGenerateRecipeChoiceRow(
@@ -2294,6 +2845,123 @@ TSharedRef<ITableRow> SSFPPlannerWindow::HandleGenerateRecipeChoiceRow(
 			return SFPLocalization::Text(Locked + Row->Selected->ConfigurationDetail);
 		})
 	];
+	for (const TSharedPtr<FSFPRecipeChoiceRow>& RawRow : Row->GroupedRawExtractions)
+	{
+		if (!RawRow.IsValid() || !RawRow->Selected.IsValid()) continue;
+		Body->AddSlot().AutoHeight().Padding(3, 10, 3, 4)
+		[
+			SNew(STextBlock)
+			.Text(FText::FromString(
+				SFPLocalization::Text(TEXT("Rohstoff & Miner")).ToString() + TEXT(": ")
+				+ SFPLocalization::Text(RawRow->ItemName).ToString()))
+			.Font(FCoreStyle::GetDefaultFontStyle(TEXT("Bold"), 10))
+		];
+		Body->AddSlot().AutoHeight().Padding(3, 2, 3, 6)
+		[
+			SNew(STextBlock).AutoWrapText(true).Text(SFPLocalization::Text(
+				TEXT("Reiner Rohstoffabbau: Der Miner liefert den Rohstoff unverarbeitet. Die Auswahl unten gilt für diese Ausgabe.")))
+		];
+		TArray<FField> RawFields;
+		RawFields.Add(&FSFPRecipeOption::Category);
+		RawFields.Add(&FSFPRecipeOption::SourceName);
+		RawFields.Add(&FSFPRecipeOption::MachineName);
+		RawFields.Add(&FSFPRecipeOption::Purity);
+		RawFields.Add(&FSFPRecipeOption::ModulesLabel);
+		RawFields.Add(&FSFPRecipeOption::FluidLabel);
+		const TArray<FString> RawLabels = {
+			TEXT("Bezugsweg"),
+			TEXT("Rohstoff am Eingang"),
+			TEXT("Miner / Förderanlage"),
+			TEXT("Reinheit"),
+			TEXT("Module / Bohrkopf"),
+			TEXT("Betriebsflüssigkeit")
+		};
+		for (int32 FieldIndex = 0; FieldIndex < RawFields.Num(); ++FieldIndex)
+		{
+			const FField Field = RawFields[FieldIndex];
+			TSharedRef<TArray<TSharedPtr<FString>>> Values = MakeShared<TArray<TSharedPtr<FString>>>();
+			for (const TSharedPtr<FSFPRecipeOption>& Option : RawRow->Options)
+			{
+				if (!Option.IsValid()) continue;
+				bool bMatches = true;
+				for (int32 Previous = 0; Previous < FieldIndex && RawRow->Selected.IsValid(); ++Previous)
+				{
+					if (Option.Get()->*RawFields[Previous] != RawRow->Selected.Get()->*RawFields[Previous]) bMatches = false;
+				}
+				const FString Value = Option.Get()->*Field;
+				if (bMatches && !Value.IsEmpty()
+					&& !Values->ContainsByPredicate([&](const TSharedPtr<FString>& Existing) { return *Existing == Value; }))
+				{
+					Values->Add(MakeShared<FString>(Value));
+				}
+			}
+			if (Values->IsEmpty()) continue;
+			TSharedPtr<FString> Initial;
+			for (const TSharedPtr<FString>& Value : *Values)
+			{
+				if (RawRow->Selected.IsValid() && *Value == RawRow->Selected.Get()->*Field) Initial = Value;
+			}
+			Body->AddSlot().AutoHeight().Padding(3, 1)
+			[
+				SNew(STextBlock).Text(SFPLocalization::Text(RawLabels[FieldIndex]))
+			];
+			Body->AddSlot().AutoHeight().Padding(3, 0, 3, 4)
+			[
+				SNew(SComboBox<TSharedPtr<FString>>)
+				.OptionsSource(&Values.Get()).InitiallySelectedItem(Initial).MaxListHeight(320.0f)
+				.OnGenerateWidget_Lambda([](TSharedPtr<FString> Value)
+				{
+					return StaticCastSharedRef<SWidget>(SNew(STextBlock).Text(
+						Value.IsValid() ? SFPLocalization::Text(*Value) : FText::GetEmpty()));
+				})
+				.OnSelectionChanged_Lambda([this, RawRow, Values, RawFields, FieldIndex, Field](
+					TSharedPtr<FString> Value,
+					ESelectInfo::Type Info)
+				{
+					if (Info == ESelectInfo::Direct || !Value.IsValid() || Values->IsEmpty()) return;
+					TSharedPtr<FSFPRecipeOption> Best;
+					int32 BestScore = MIN_int32;
+					for (const TSharedPtr<FSFPRecipeOption>& Option : RawRow->Options)
+					{
+						if (!Option.IsValid() || Option.Get()->*Field != *Value) continue;
+						bool bMatches = true;
+						int32 Score = Option->bAvailable ? 100 : 0;
+						for (int32 I = 0; I < RawFields.Num() && RawRow->Selected.IsValid(); ++I)
+						{
+							const bool bEqual = Option.Get()->*RawFields[I] == RawRow->Selected.Get()->*RawFields[I];
+							if (I < FieldIndex && !bEqual) bMatches = false;
+							if (bEqual) ++Score;
+						}
+						if (bMatches && Score > BestScore) { Best = Option; BestScore = Score; }
+					}
+					if (!Best.IsValid()) return;
+					RawRow->Selected = Best;
+					RecipeOverrides.Add(RawRow->ItemClassPath, Best->RecipeClassPath);
+					StatusText = TEXT("Bezugsweg geändert – jetzt Produktionsplan neu berechnen und speichern.");
+					if (RecipeChoiceList.IsValid()) RecipeChoiceList->RebuildList();
+					RefreshMachineSettings();
+				})
+				[
+					SNew(STextBlock).Text_Lambda([RawRow, Field]()
+					{
+						return RawRow->Selected.IsValid()
+							? SFPLocalization::Text(RawRow->Selected.Get()->*Field)
+							: FText::GetEmpty();
+					})
+				]
+			];
+		}
+		Body->AddSlot().AutoHeight().Padding(3, 2)
+		[
+			SNew(STextBlock).AutoWrapText(true).Text_Lambda([RawRow]()
+			{
+				if (!RawRow->Selected.IsValid()) return FText::GetEmpty();
+				const FString Locked = RawRow->Selected->bAvailable
+					? FString() : TEXT("Gesperrt – im aktuellen Spielstand nicht verfügbar. ");
+				return SFPLocalization::Text(Locked + RawRow->Selected->ConfigurationDetail);
+			})
+		];
+	}
 	Body->AddSlot().AutoHeight().Padding(3, 2, 3, 8)
 	[
 		SNew(SButton).Text(SFPLocalization::Text(TEXT("Diese Einstellungen bestätigen")))
@@ -2302,6 +2970,13 @@ TSharedRef<ITableRow> SSFPPlannerWindow::HandleGenerateRecipeChoiceRow(
 			if (Row->Selected.IsValid())
 			{
 				RecipeOverrides.Add(Row->ItemClassPath, Row->Selected->RecipeClassPath);
+				for (const TSharedPtr<FSFPRecipeChoiceRow>& RawRow : Row->GroupedRawExtractions)
+				{
+					if (RawRow.IsValid() && RawRow->Selected.IsValid())
+					{
+						RecipeOverrides.Add(RawRow->ItemClassPath, RawRow->Selected->RecipeClassPath);
+					}
+				}
 				StatusText = TEXT("Auswahl bestätigt – Plan neu berechnen und speichern.");
 			}
 			return FReply::Handled();
@@ -2465,6 +3140,9 @@ void SSFPPlannerWindow::CaptureInputBudgetsToPlan()
 	{
 		CurrentPlan->RequestedNetPowerMW = PowerTargetNetMW;
 		CurrentPlan->PowerReservePercent = PowerReservePercent;
+		CurrentPlan->ConfiguredGeneratorClockPercent = PowerGeneratorClockPercent;
+		CurrentPlan->PassiveAlienPowerAugmenters = PassiveAlienPowerAugmenters;
+		CurrentPlan->FueledAlienPowerAugmenters = FueledAlienPowerAugmenters;
 		CurrentPlan->RequestedGeneratorClassPath = SelectedPowerGenerator.IsValid()
 			? SelectedPowerGenerator->ClassPath
 			: FString();
@@ -2564,7 +3242,7 @@ FReply SSFPPlannerWindow::HandleSavePlan()
 		{
 			if (SelectedSavedPlan->FileName != ActiveSharedPlanFileName || ActiveSharedPlanRevision <= 0)
 			{
-				StatusText = TEXT("Bestehenden Serverplan vor dem Überschreiben zuerst laden");
+				StatusText = TEXT("Bestehenden Multiplayer-Plan vor dem Überschreiben zuerst laden");
 				return FReply::Handled();
 			}
 			ExpectedRevision = ActiveSharedPlanRevision;
@@ -2603,14 +3281,14 @@ FReply SSFPPlannerWindow::HandleLoadSavedPlan()
 		const FString SelectedFileName = SelectedSavedPlan->FileName;
 		FString Error;
 		bSharedPlanRequestPending = true;
-		StatusText = FString::Printf(TEXT("Serverplan „%s“ wird geladen …"), *SelectedName);
+		StatusText = FString::Printf(TEXT("Multiplayer-Plan „%s“ wird geladen …"), *SelectedName);
 		if (!USFPPlannerRemoteCallObject::RequestSharedPlanDownload(
 			PlayerController.Get(),
 			SelectedFileName,
 			Error))
 		{
 			bSharedPlanRequestPending = false;
-			StatusText = FString::Printf(TEXT("Serverplan laden fehlgeschlagen: %s"), *Error);
+			StatusText = FString::Printf(TEXT("Multiplayer-Plan laden fehlgeschlagen: %s"), *Error);
 		}
 		return FReply::Handled();
 	}
@@ -2649,8 +3327,8 @@ FReply SSFPPlannerWindow::HandleDeleteSavedPlan()
 				? SFPLocalization::Select(TEXT("dieses Plans"), TEXT("of this plan"))
 				: SelectedSavedPlan->OwnerName;
 			StatusText = SFPLocalization::IsGerman()
-				? FString::Printf(TEXT("Nur der Ersteller %s darf diesen Serverplan löschen"), *OwnerName)
-				: FString::Printf(TEXT("Only the creator %s may delete this server plan"), *OwnerName);
+				? FString::Printf(TEXT("Nur der Ersteller %s darf diesen Multiplayer-Plan löschen"), *OwnerName)
+				: FString::Printf(TEXT("Only the creator %s may delete this multiplayer plan"), *OwnerName);
 			return FReply::Handled();
 		}
 		const FString SelectedName = SelectedSavedPlan->Name;
@@ -2658,7 +3336,7 @@ FReply SSFPPlannerWindow::HandleDeleteSavedPlan()
 		const int64 SelectedRevision = SelectedSavedPlan->Revision;
 		FString Error;
 		bSharedPlanRequestPending = true;
-		StatusText = FString::Printf(TEXT("Serverplan „%s“ wird gelöscht …"), *SelectedName);
+		StatusText = FString::Printf(TEXT("Multiplayer-Plan „%s“ wird gelöscht …"), *SelectedName);
 		if (!USFPPlannerRemoteCallObject::RequestSharedPlanDelete(
 			PlayerController.Get(),
 			SelectedFileName,
@@ -2666,7 +3344,7 @@ FReply SSFPPlannerWindow::HandleDeleteSavedPlan()
 			Error))
 		{
 			bSharedPlanRequestPending = false;
-			StatusText = FString::Printf(TEXT("Serverplan löschen fehlgeschlagen: %s"), *Error);
+			StatusText = FString::Printf(TEXT("Multiplayer-Plan löschen fehlgeschlagen: %s"), *Error);
 		}
 		return FReply::Handled();
 	}
@@ -2708,7 +3386,7 @@ FReply SSFPPlannerWindow::HandleTogglePlanScope()
 		SavedPlanCombo->RefreshOptions();
 	}
 	StatusText = bSharedPlanMode
-		? TEXT("Serverpläne: gemeinsam gespeichert und für alle Spieler synchronisiert")
+		? TEXT("Multiplayer-Pläne: gemeinsam gespeichert und für alle Spieler synchronisiert")
 		: TEXT("Persönliche Pläne: nur auf diesem Client gespeichert");
 	RefreshNamedPlans();
 	return FReply::Handled();
@@ -2729,11 +3407,11 @@ bool SSFPPlannerWindow::QueueSharedPlanSave(
 		if (bAutomaticProgressSave)
 		{
 			bSharedProgressDirty = true;
-			StatusText = TEXT("Serverplan-Synchronisierung läuft; neuer Fortschritt wird danach übertragen");
+			StatusText = TEXT("Multiplayer-Plan-Synchronisierung läuft; neuer Fortschritt wird danach übertragen");
 		}
 		else
 		{
-			StatusText = TEXT("Eine Serverplan-Anfrage läuft bereits");
+			StatusText = TEXT("Eine Multiplayer-Plan-Anfrage läuft bereits");
 		}
 		return false;
 	}
@@ -2746,8 +3424,8 @@ bool SSFPPlannerWindow::QueueSharedPlanSave(
 		bSharedPlanContentDirty = false;
 	}
 	StatusText = bAutomaticProgressSave
-		? TEXT("Baufortschritt wird mit dem Serverplan synchronisiert …")
-		: FString::Printf(TEXT("Serverplan „%s“ wird gespeichert …"), *Name);
+		? TEXT("Baufortschritt wird mit dem Multiplayer-Plan synchronisiert …")
+		: FString::Printf(TEXT("Multiplayer-Plan „%s“ wird gespeichert …"), *Name);
 	if (!USFPPlannerRemoteCallObject::RequestSharedPlanSave(
 		PlayerController.Get(),
 		Name,
@@ -2761,7 +3439,7 @@ bool SSFPPlannerWindow::QueueSharedPlanSave(
 		{
 			bSharedPlanContentDirty = true;
 		}
-		StatusText = FString::Printf(TEXT("Serverplan speichern fehlgeschlagen: %s"), *Error);
+		StatusText = FString::Printf(TEXT("Multiplayer-Plan speichern fehlgeschlagen: %s"), *Error);
 		return false;
 	}
 	return true;
@@ -2876,7 +3554,7 @@ void SSFPPlannerWindow::HandleNodeCompletionChanged(const int32 NodeId, const bo
 		StatusText = BuildPlanStatusText(
 			*CurrentPlan,
 			TOptional<double>(),
-			ProgressMessage + TEXT(" — lokal geändert; mit SPEICHERN als Serverplan veröffentlichen"));
+			ProgressMessage + TEXT(" — lokal geändert; mit SPEICHERN als Multiplayer-Plan veröffentlichen"));
 		return;
 	}
 	StatusText = BuildPlanStatusText(*CurrentPlan, TOptional<double>(), ProgressMessage);
@@ -2927,6 +3605,74 @@ void SSFPPlannerWindow::HandlePowerReservePercentChanged(const double NewValue)
 {
 	PowerReservePercent = FMath::Clamp(NewValue, 0.0, 500.0);
 	StatusText = TEXT("Leistungsreserve geändert – Stromplan neu berechnen");
+}
+
+TOptional<double> SSFPPlannerWindow::GetPowerGeneratorClockPercent() const
+{
+	return PowerGeneratorClockPercent;
+}
+
+TOptional<double> SSFPPlannerWindow::GetPowerGeneratorMinClockPercent() const
+{
+	if (!SelectedPowerGenerator.IsValid() || SelectedPowerGenerator->ClassPath.IsEmpty())
+	{
+		return 1.0;
+	}
+	if (!SelectedPowerGenerator->bCanChangePotential)
+	{
+		return 100.0;
+	}
+	return FMath::Max(1.0, SelectedPowerGenerator->MinPotential * 100.0);
+}
+
+TOptional<double> SSFPPlannerWindow::GetPowerGeneratorMaxClockPercent() const
+{
+	if (!SelectedPowerGenerator.IsValid() || SelectedPowerGenerator->ClassPath.IsEmpty())
+	{
+		return 250.0;
+	}
+	if (!SelectedPowerGenerator->bCanChangePotential)
+	{
+		return 100.0;
+	}
+	return FMath::Max(100.0, SelectedPowerGenerator->MaxPotential * 100.0);
+}
+
+void SSFPPlannerWindow::HandlePowerGeneratorClockPercentChanged(const double NewValue)
+{
+	if (!FMath::IsFinite(NewValue))
+	{
+		return;
+	}
+	const TOptional<double> MinClockValue = GetPowerGeneratorMinClockPercent();
+	const TOptional<double> MaxClockValue = GetPowerGeneratorMaxClockPercent();
+	const double MinClock = MinClockValue.IsSet() ? MinClockValue.GetValue() : 1.0;
+	const double MaxClock = MaxClockValue.IsSet() ? MaxClockValue.GetValue() : 250.0;
+	PowerGeneratorClockPercent = FMath::Clamp(NewValue, MinClock, MaxClock);
+	bCarryCurrentPlanProgress = false;
+	StatusText = TEXT("Generator-Takt geändert – Stromplan neu berechnen");
+}
+
+TOptional<int32> SSFPPlannerWindow::GetPassiveAlienPowerAugmenters() const
+{
+	return PassiveAlienPowerAugmenters;
+}
+
+void SSFPPlannerWindow::HandlePassiveAlienPowerAugmentersChanged(const int32 NewValue)
+{
+	PassiveAlienPowerAugmenters = FMath::Clamp(NewValue, 0, 10000);
+	StatusText = TEXT("Alien Power Augmenter geändert – Stromplan neu berechnen");
+}
+
+TOptional<int32> SSFPPlannerWindow::GetFueledAlienPowerAugmenters() const
+{
+	return FueledAlienPowerAugmenters;
+}
+
+void SSFPPlannerWindow::HandleFueledAlienPowerAugmentersChanged(const int32 NewValue)
+{
+	FueledAlienPowerAugmenters = FMath::Clamp(NewValue, 0, 10000);
+	StatusText = TEXT("Alien Power Augmenter mit Matrix geändert – Stromplan neu berechnen");
 }
 
 TOptional<double> SSFPPlannerWindow::GetEstimatedConnectionLength() const
@@ -3016,7 +3762,7 @@ FText SSFPPlannerWindow::GetPowerSummaryText() const
 			"ERZEUGUNG\n"
 			"• Generator: %s\n"
 			"• Betriebsart: %s\n"
-			"• Generatorleistung: %s MW je Gebäude\n"
+			"• Generatorleistung: %s MW je Gebäude bei %s%% (Basis %s MW @ 100%%)\n"
 			"• %d Generatoren bauen | %s\n"),
 		*FSFPNumberFormatting::Decimal(Plan.RequestedNetPowerMW, 2),
 		*FSFPNumberFormatting::Decimal(Plan.GrossPowerMW, 2),
@@ -3027,8 +3773,33 @@ FText SSFPPlannerWindow::GetPowerSummaryText() const
 		*Plan.SelectedGeneratorDisplayName,
 		*Plan.SelectedFuelDisplayName,
 		*FSFPNumberFormatting::Decimal(Plan.GeneratorPowerMW, 2),
+		*FSFPNumberFormatting::Decimal(Plan.ConfiguredGeneratorClockPercent, 1),
+		*FSFPNumberFormatting::Decimal(Plan.GeneratorBasePowerMW > KINDA_SMALL_NUMBER ? Plan.GeneratorBasePowerMW : Plan.GeneratorPowerMW, 2),
 		Plan.BuiltGeneratorCount,
-		*BuildClockingBreakdown(Plan.EquivalentGeneratorCount));
+		*BuildPowerGeneratorClockingBreakdown(Plan));
+
+	if (Plan.PassiveAlienPowerAugmenters + Plan.FueledAlienPowerAugmenters > 0)
+	{
+		Summary += FString::Printf(
+			TEXT("\nALIEN POWER AUGMENTER\n"
+				"• Passiv: %d | Mit Matrix: %d\n"
+				"• Generatorbasis vor Augmenter: %s MW\n"
+				"• Augmenter-Basisleistung: %s MW | Netzfaktor ×%s\n"
+				"• Augmenter-Beitrag zur Bruttoerzeugung: %s MW\n"),
+			Plan.PassiveAlienPowerAugmenters,
+			Plan.FueledAlienPowerAugmenters,
+			*FSFPNumberFormatting::Decimal(Plan.BaseGeneratorGrossPowerMW, 2),
+			*FSFPNumberFormatting::Decimal(Plan.AlienPowerAugmenterBaseMW, 2),
+			*FSFPNumberFormatting::Decimal(Plan.AlienPowerMultiplier, 3),
+			*FSFPNumberFormatting::Decimal(Plan.AlienPowerContributionMW, 2));
+		if (Plan.AlienPowerMatrixRatePerMinute > KINDA_SMALL_NUMBER)
+		{
+			Summary += FString::Printf(
+				TEXT("• %s: %s/min\n"),
+				Plan.AlienPowerMatrixDisplayName.IsEmpty() ? TEXT("Alien Power Matrix") : *Plan.AlienPowerMatrixDisplayName,
+				*FSFPNumberFormatting::Decimal(Plan.AlienPowerMatrixRatePerMinute, 3));
+		}
+	}
 
 	if (Plan.SelectedFuelClassPath == TEXT("SFP.FuelFree"))
 	{
@@ -3133,7 +3904,7 @@ FText SSFPPlannerWindow::GetMachineSummaryText() const
 		{
 			continue;
 		}
-		const int32 WholeMachines = FMath::Max(1, FMath::CeilToInt(Node.MachineCount));
+		const int32 WholeMachines = BuiltMachineCountForNode(Node);
 		MachineNodes.Add(&Node);
 		TotalWholeMachines += WholeMachines;
 	}
@@ -3184,12 +3955,28 @@ FText SSFPPlannerWindow::GetMachineSummaryText() const
 				break;
 			}
 		}
+		FString OperatingDetail = BuildClockingBreakdown(*MachineNode);
+		if (MachineNode->SomersloopCount > 0)
+		{
+			OperatingDetail += FString::Printf(
+				TEXT(" | %d Somersloop(s)/Maschine | Boost %s%%"),
+				MachineNode->SomersloopCount,
+				*FSFPNumberFormatting::Decimal(MachineNode->ProductionBoost * 100.0, 1));
+		}
+		if (MachineNode->bFuelPowered && !MachineNode->FuelDisplayName.IsEmpty())
+		{
+			OperatingDetail += FString::Printf(
+				TEXT(" | %s %s/min | Brennleistung %s MW"),
+				*MachineNode->FuelDisplayName,
+				*FSFPNumberFormatting::Decimal(MachineNode->FuelRatePerMinute, 3),
+				*FSFPNumberFormatting::Decimal(MachineNode->PowerMW, 2));
+		}
 		Summary += FString::Printf(
 			TEXT("• %s → %s: %d bauen  |  %s\n"),
 			*MachineNode->Title,
 			*ProductName,
-			FMath::Max(1, FMath::CeilToInt(MachineNode->MachineCount)),
-			*BuildClockingBreakdown(MachineNode->MachineCount));
+			BuiltMachineCountForNode(*MachineNode),
+			*OperatingDetail);
 	}
 	TArray<FString> RoutingNames;
 	RoutingByIngameName.GenerateKeyArray(RoutingNames);
@@ -3300,8 +4087,8 @@ FText SSFPPlannerWindow::GetSelectedSavedPlanText() const
 		if (bSharedPlanMode)
 		{
 			return SFPLocalization::Text(SavedPlans.IsEmpty()
-				? TEXT("Noch keine Serverpläne")
-				: TEXT("Serverplan auswählen ..."));
+				? TEXT("Noch keine Multiplayer-Pläne")
+				: TEXT("Multiplayer-Plan auswählen ..."));
 		}
 		return SFPLocalization::Text(SavedPlans.IsEmpty()
 			? TEXT("Noch keine benannten Pläne")
@@ -3328,7 +4115,7 @@ FText SSFPPlannerWindow::GetSelectedSavedPlanText() const
 
 FText SSFPPlannerWindow::GetPlanScopeText() const
 {
-	return SFPLocalization::Text(bSharedPlanMode ? TEXT("SERVER") : TEXT("PERSÖNLICH"));
+	return SFPLocalization::Text(bSharedPlanMode ? TEXT("MULTIPLAYER") : TEXT("PERSÖNLICH"));
 }
 
 void SSFPPlannerWindow::HandlePlanNameChanged(const FText& NewText)
@@ -3454,7 +4241,7 @@ void SSFPPlannerWindow::RequestSharedPlanCatalog(const FString& SelectFileName)
 	if (!USFPPlannerRemoteCallObject::RequestSharedPlanCatalog(PlayerController.Get(), Error))
 	{
 		bSharedPlanRequestPending = false;
-		StatusText = FString::Printf(TEXT("Serverplan-Liste konnte nicht geladen werden: %s"), *Error);
+		StatusText = FString::Printf(TEXT("Multiplayer-Plan-Liste konnte nicht geladen werden: %s"), *Error);
 		return;
 	}
 }
@@ -3543,12 +4330,12 @@ void SSFPPlannerWindow::ReceiveSharedPlan(
 	bSharedPlanRequestPending = false;
 	if (!Error.IsEmpty())
 	{
-		StatusText = FString::Printf(TEXT("Serverplan laden fehlgeschlagen: %s"), *Error);
+		StatusText = FString::Printf(TEXT("Multiplayer-Plan laden fehlgeschlagen: %s"), *Error);
 		return;
 	}
 	if (Summary.FileName.IsEmpty() || Summary.Revision <= 0 || PlanJson.IsEmpty())
 	{
-		StatusText = TEXT("Empfangener Serverplan enthält keine gültigen Servermetadaten");
+		StatusText = TEXT("Empfangener Multiplayer-Plan enthält keine gültigen Servermetadaten");
 		return;
 	}
 	FString SerializedName;
@@ -3559,7 +4346,7 @@ void SSFPPlannerWindow::ReceiveSharedPlan(
 		ParseError);
 	if (!Plan.IsValid())
 	{
-		StatusText = FString::Printf(TEXT("Empfangener Serverplan ist ungültig: %s"), *ParseError);
+		StatusText = FString::Printf(TEXT("Empfangener Multiplayer-Plan ist ungültig: %s"), *ParseError);
 		return;
 	}
 	if (!bSharedPlanMode)
@@ -3600,7 +4387,7 @@ void SSFPPlannerWindow::ReceiveSharedPlan(
 		*Plan,
 		TOptional<double>(),
 		FString::Printf(
-			TEXT("Serverplan „%s“ synchronisiert (Revision %lld)"),
+			TEXT("Multiplayer-Plan „%s“ synchronisiert (Revision %lld)"),
 			*PlanNameText,
 			static_cast<long long>(Summary.Revision)));
 }
@@ -3621,7 +4408,7 @@ void SSFPPlannerWindow::ReceiveSharedPlanSaveResult(
 			bSharedPlanContentDirty = true;
 		}
 		StatusText = FString::Printf(
-			TEXT("Serverplan speichern fehlgeschlagen: %s"),
+			TEXT("Multiplayer-Plan speichern fehlgeschlagen: %s"),
 			*Error);
 		return;
 	}
@@ -3636,11 +4423,11 @@ void SSFPPlannerWindow::ReceiveSharedPlanSaveResult(
 	}
 	StatusText = bWasAutomatic
 		? (SFPLocalization::IsGerman()
-			? FString::Printf(TEXT("Baufortschritt mit Serverplan „%s“ synchronisiert"), *Summary.Name)
-			: FString::Printf(TEXT("Build progress synchronized with server plan “%s”"), *Summary.Name))
+			? FString::Printf(TEXT("Baufortschritt mit Multiplayer-Plan „%s“ synchronisiert"), *Summary.Name)
+			: FString::Printf(TEXT("Build progress synchronized with multiplayer plan “%s”"), *Summary.Name))
 		: (SFPLocalization::IsGerman()
-			? FString::Printf(TEXT("Serverplan „%s“ gespeichert"), *Summary.Name)
-			: FString::Printf(TEXT("Server plan “%s” saved"), *Summary.Name));
+			? FString::Printf(TEXT("Multiplayer-Plan „%s“ gespeichert"), *Summary.Name)
+			: FString::Printf(TEXT("Multiplayer plan “%s” saved"), *Summary.Name));
 
 	if (bSharedProgressDirty)
 	{
@@ -3658,12 +4445,12 @@ void SSFPPlannerWindow::ReceiveSharedPlanDeleteResult(
 	bSharedPlanRequestPending = false;
 	if (!bSuccess)
 	{
-		StatusText = FString::Printf(TEXT("Serverplan löschen fehlgeschlagen: %s"), *Error);
+		StatusText = FString::Printf(TEXT("Multiplayer-Plan löschen fehlgeschlagen: %s"), *Error);
 		return;
 	}
 	StatusText = SFPLocalization::IsGerman()
-		? FString::Printf(TEXT("Serverplan „%s“ wurde gelöscht"), *PlanName)
-		: FString::Printf(TEXT("Server plan “%s” was deleted"), *PlanName);
+		? FString::Printf(TEXT("Multiplayer-Plan „%s“ wurde gelöscht"), *PlanName)
+		: FString::Printf(TEXT("Multiplayer plan “%s” was deleted"), *PlanName);
 }
 
 void SSFPPlannerWindow::NotifySharedPlanChanged(const FSFPSharedPlanSummary& Summary)
@@ -3709,11 +4496,11 @@ void SSFPPlannerWindow::NotifySharedPlanChanged(const FSFPSharedPlanSummary& Sum
 			: Summary.UpdatedBy;
 		StatusText = SFPLocalization::IsGerman()
 			? FString::Printf(
-				TEXT("Serverplan „%s“ wurde von %s geändert; lokale Änderungen bleiben erhalten — neu laden oder unter neuem Namen speichern"),
+				TEXT("Multiplayer-Plan „%s“ wurde von %s geändert; lokale Änderungen bleiben erhalten — neu laden oder unter neuem Namen speichern"),
 				*Summary.Name,
 				*EditorName)
 			: FString::Printf(
-				TEXT("Server plan “%s” was changed by %s; local changes are preserved — reload or save under a new name"),
+				TEXT("Multiplayer plan “%s” was changed by %s; local changes are preserved — reload or save under a new name"),
 				*Summary.Name,
 				*EditorName);
 		return;
@@ -3726,11 +4513,11 @@ void SSFPPlannerWindow::NotifySharedPlanChanged(const FSFPSharedPlanSummary& Sum
 			: Summary.UpdatedBy;
 		StatusText = SFPLocalization::IsGerman()
 			? FString::Printf(
-				TEXT("%s aktualisierte den Serverplan „%s“; neuer Stand wird geladen …"),
+				TEXT("%s aktualisierte den Multiplayer-Plan „%s“; neuer Stand wird geladen …"),
 				*EditorName,
 				*Summary.Name)
 			: FString::Printf(
-				TEXT("%s updated server plan “%s”; loading the new revision …"),
+				TEXT("%s updated multiplayer plan “%s”; loading the new revision …"),
 				*EditorName,
 				*Summary.Name);
 		bSharedPlanRequestPending = true;
@@ -3740,7 +4527,7 @@ void SSFPPlannerWindow::NotifySharedPlanChanged(const FSFPSharedPlanSummary& Sum
 			RequestError))
 		{
 			bSharedPlanRequestPending = false;
-			StatusText = FString::Printf(TEXT("Serverplan-Aktualisierung fehlgeschlagen: %s"), *RequestError);
+			StatusText = FString::Printf(TEXT("Multiplayer-Plan-Aktualisierung fehlgeschlagen: %s"), *RequestError);
 		}
 		return;
 	}
@@ -3748,8 +4535,8 @@ void SSFPPlannerWindow::NotifySharedPlanChanged(const FSFPSharedPlanSummary& Sum
 		? SFPLocalization::Select(TEXT("einem Spieler"), TEXT("another player"))
 		: Summary.UpdatedBy;
 	StatusText = SFPLocalization::IsGerman()
-		? FString::Printf(TEXT("Serverplan „%s“ wurde von %s aktualisiert"), *Summary.Name, *EditorName)
-		: FString::Printf(TEXT("Server plan “%s” was updated by %s"), *Summary.Name, *EditorName);
+		? FString::Printf(TEXT("Multiplayer-Plan „%s“ wurde von %s aktualisiert"), *Summary.Name, *EditorName)
+		: FString::Printf(TEXT("Multiplayer plan “%s” was updated by %s"), *Summary.Name, *EditorName);
 }
 
 void SSFPPlannerWindow::NotifySharedPlanDeleted(
@@ -3784,11 +4571,11 @@ void SSFPPlannerWindow::NotifySharedPlanDeleted(
 		: DeletedBy;
 	StatusText = SFPLocalization::IsGerman()
 		? FString::Printf(
-			TEXT("Serverplan „%s“ wurde von %s gelöscht; der aktuelle Graph bleibt geöffnet"),
+			TEXT("Multiplayer-Plan „%s“ wurde von %s gelöscht; der aktuelle Graph bleibt geöffnet"),
 			*PlanName,
 			*EditorName)
 		: FString::Printf(
-			TEXT("Server plan “%s” was deleted by %s; the current graph remains open"),
+			TEXT("Multiplayer plan “%s” was deleted by %s; the current graph remains open"),
 			*PlanName,
 			*EditorName);
 }
@@ -3813,10 +4600,23 @@ void SSFPPlannerWindow::ApplyPlanToUI(const TSharedPtr<FSFPPlanResult>& Plan)
 		? Plan->RequestedNetPowerMW
 		: 1000.0);
 	PowerReservePercent = FMath::Clamp(Plan->PowerReservePercent, 0.0, 500.0);
+	PowerGeneratorClockPercent = FMath::Clamp(
+		Plan->ConfiguredGeneratorClockPercent > 0.0 ? Plan->ConfiguredGeneratorClockPercent : 100.0,
+		1.0,
+		100000.0);
+	PassiveAlienPowerAugmenters = FMath::Max(0, Plan->PassiveAlienPowerAugmenters);
+	FueledAlienPowerAugmenters = FMath::Max(0, Plan->FueledAlienPowerAugmenters);
 	RefreshPowerChoices(
 		Plan->RequestedGeneratorClassPath,
 		Plan->RequestedFuelClassPath);
+	const TOptional<double> LoadedMinClock = GetPowerGeneratorMinClockPercent();
+	const TOptional<double> LoadedMaxClock = GetPowerGeneratorMaxClockPercent();
+	PowerGeneratorClockPercent = FMath::Clamp(
+		PowerGeneratorClockPercent,
+		LoadedMinClock.IsSet() ? LoadedMinClock.GetValue() : 1.0,
+		LoadedMaxClock.IsSet() ? LoadedMaxClock.GetValue() : 250.0);
 	RecipeOverrides = Plan->RecipeOverrides;
+	MachineSettingsOverrides = Plan->MachineSettings;
     bInputPlanning = Plan->bInputPlanning;
     SelectedSupplies.Reset();
     for (const auto& Supply : Plan->Supplies) SelectedSupplies.Add(MakeShared<FSFPPlanSupply>(Supply));

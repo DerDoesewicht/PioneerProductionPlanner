@@ -266,8 +266,8 @@ USFPPlannerRemoteCallObject* USFPPlannerRemoteCallObject::ResolveForLocalPlayer(
 	if (!IsValid(PlayerController) || !PlayerController->IsLocalController())
 	{
 		OutError = SFPLocalization::Select(
-			TEXT("Serverpläne können nur vom lokalen Spieler angefragt werden"),
-			TEXT("Server plans can only be requested by the local player"));
+			TEXT("Multiplayer-Pläne können nur vom lokalen Spieler angefragt werden"),
+			TEXT("Multiplayer plans can only be requested by the local player"));
 		return nullptr;
 	}
 	USFPPlannerRemoteCallObject* RemoteCallObject = SFPPlannerRemoteCallObjectPrivate::FindRemoteCallObject(
@@ -275,8 +275,8 @@ USFPPlannerRemoteCallObject* USFPPlannerRemoteCallObject::ResolveForLocalPlayer(
 	if (!IsValid(RemoteCallObject))
 	{
 		OutError = SFPLocalization::Select(
-			TEXT("Die Multiplayer-Verbindung für Serverpläne ist noch nicht bereit"),
-			TEXT("The multiplayer bridge for server plans is not ready yet"));
+			TEXT("Die Multiplayer-Verbindung für Multiplayer-Pläne ist noch nicht bereit"),
+			TEXT("The multiplayer bridge for multiplayer plans is not ready yet"));
 		return nullptr;
 	}
 	return RemoteCallObject;
@@ -443,7 +443,7 @@ bool USFPPlannerRemoteCallObject::RequestSharedPlanDownload(
 {
 	if (FileName.IsEmpty())
 	{
-		OutError = TEXT("Kein Serverplan ausgewählt");
+		OutError = TEXT("Kein Multiplayer-Plan ausgewählt");
 		return false;
 	}
 	USFPPlannerRemoteCallObject* RemoteCallObject = ResolveForLocalPlayer(PlayerController, OutError);
@@ -476,8 +476,8 @@ bool USFPPlannerRemoteCallObject::RequestSharedPlanSave(
 	if (PlanJson.Len() > SFPPlannerRemoteCallObjectPrivate::MaxSharedPlanUploadCharacters)
 	{
 		OutError = SFPLocalization::Select(
-			TEXT("Der Serverplan überschreitet das Netzwerklimit von 512 KiB"),
-			TEXT("The server plan exceeds the 512 KiB network limit"));
+			TEXT("Der Multiplayer-Plan überschreitet das Netzwerklimit von 512 KiB"),
+			TEXT("The multiplayer plan exceeds the 512 KiB network limit"));
 		return false;
 	}
 	const FString TransferId = FGuid::NewGuid().ToString(EGuidFormats::Digits);
@@ -627,7 +627,7 @@ void USFPPlannerRemoteCallObject::ServerRequestSharedPlanDownload_Implementation
 		ClientReceiveSharedPlan(
 			FSFPSharedPlanSummary(),
 			FString(),
-			TEXT("Der gespeicherte Serverplan überschreitet das Netzwerklimit von 512 KiB"));
+			TEXT("Der gespeicherte Multiplayer-Plan überschreitet das Netzwerklimit von 512 KiB"));
 		return;
 	}
 	SFPPlannerRemoteCallObjectPrivate::SendSharedPlanDownload(
@@ -677,7 +677,7 @@ void USFPPlannerRemoteCallObject::ServerBeginSharedPlanUpload_Implementation(
 		ClientReceiveSharedPlanSaveResult(
 			false,
 			FSFPSharedPlanSummary(),
-			TEXT("Ungültige Serverplan-Übertragung wurde abgewiesen"));
+			TEXT("Ungültige Multiplayer-Plan-Übertragung wurde abgewiesen"));
 		return;
 	}
 	const int32 ExpectedChunkCount = SFPPlannerRemoteCallObjectPrivate::ChunkCountForCharacters(
@@ -687,7 +687,7 @@ void USFPPlannerRemoteCallObject::ServerBeginSharedPlanUpload_Implementation(
 		ClientReceiveSharedPlanSaveResult(
 			false,
 			FSFPSharedPlanSummary(),
-			TEXT("Ungültige Serverplan-Blockanzahl wurde abgewiesen"));
+			TEXT("Ungültige Multiplayer-Plan-Blockanzahl wurde abgewiesen"));
 		return;
 	}
 	PendingUploadTransferId = TransferId;
@@ -716,7 +716,7 @@ void USFPPlannerRemoteCallObject::ServerAppendSharedPlanUploadChunk_Implementati
 		ClientReceiveSharedPlanSaveResult(
 			false,
 			FSFPSharedPlanSummary(),
-			TEXT("Serverplan-Datenblöcke sind unvollständig oder ungeordnet"));
+			TEXT("Multiplayer-Plan-Datenblöcke sind unvollständig oder ungeordnet"));
 		return;
 	}
 	PendingUploadJson += Chunk;
@@ -743,7 +743,7 @@ void USFPPlannerRemoteCallObject::ServerCommitSharedPlanUpload_Implementation(
 		|| PendingUploadJson.Len() != PendingUploadTotalCharacters)
 	{
 		ResetSharedPlanUpload();
-		ClientReceiveSharedPlanSaveResult(false, EmptySummary, TEXT("Serverplan-Übertragung wurde nicht vollständig abgeschlossen"));
+		ClientReceiveSharedPlanSaveResult(false, EmptySummary, TEXT("Multiplayer-Plan-Übertragung wurde nicht vollständig abgeschlossen"));
 		return;
 	}
 	const FString Name = PendingUploadName;
@@ -792,7 +792,7 @@ void USFPPlannerRemoteCallObject::ServerCommitSharedPlanUpload_Implementation(
 	UE_LOG(
 		LogSFPFactoryPlanner,
 		Display,
-		TEXT("Shared server plan '%s' revision %lld saved by %s"),
+		TEXT("Shared multiplayer plan '%s' revision %lld saved by %s"),
 		*SavedInfo.Name,
 		static_cast<long long>(SavedInfo.Revision),
 		*RequesterName);
@@ -834,7 +834,7 @@ void USFPPlannerRemoteCallObject::ServerDeleteSharedPlan_Implementation(
 	UE_LOG(
 		LogSFPFactoryPlanner,
 		Display,
-		TEXT("Shared server plan '%s' deleted by %s"),
+		TEXT("Shared multiplayer plan '%s' deleted by %s"),
 		*ExistingInfo.Name,
 		*RequesterName);
 }
@@ -880,7 +880,7 @@ void USFPPlannerRemoteCallObject::ClientBeginSharedPlanDownload_Implementation(
 				PlayerController,
 				FSFPSharedPlanSummary(),
 				FString(),
-				TEXT("Ungültiger Serverplan-Download wurde abgewiesen"));
+				TEXT("Ungültiger Multiplayer-Plan-Download wurde abgewiesen"));
 		}
 		return;
 	}
@@ -912,7 +912,7 @@ void USFPPlannerRemoteCallObject::ClientAppendSharedPlanDownloadChunk_Implementa
 				PlayerController,
 				FSFPSharedPlanSummary(),
 				FString(),
-				TEXT("Serverplan-Download enthält unvollständige oder ungeordnete Datenblöcke"));
+				TEXT("Multiplayer-Plan-Download enthält unvollständige oder ungeordnete Datenblöcke"));
 		}
 		return;
 	}
@@ -937,7 +937,7 @@ void USFPPlannerRemoteCallObject::ClientCommitSharedPlanDownload_Implementation(
 				PlayerController,
 				FSFPSharedPlanSummary(),
 				FString(),
-				TEXT("Serverplan-Download wurde nicht vollständig abgeschlossen"));
+				TEXT("Multiplayer-Plan-Download wurde nicht vollständig abgeschlossen"));
 		}
 		return;
 	}
@@ -950,7 +950,7 @@ void USFPPlannerRemoteCallObject::ClientCommitSharedPlanDownload_Implementation(
 		UE_LOG(
 			LogSFPFactoryPlanner,
 			Display,
-			TEXT("Shared server plan '%s' revision %lld received on owning client"),
+			TEXT("Shared multiplayer plan '%s' revision %lld received on owning client"),
 			*Summary.Name,
 			static_cast<long long>(Summary.Revision));
 	}

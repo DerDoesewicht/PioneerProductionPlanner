@@ -1,6 +1,7 @@
 #include "Widgets/SSFPGraphPanel.h"
 
 #include "InputCoreTypes.h"
+#include "Resources/FGItemDescriptor.h"
 #include "Framework/Application/SlateApplication.h"
 #include "Fonts/FontMeasure.h"
 #include "Rendering/SlateRenderer.h"
@@ -8,12 +9,32 @@
 #include "SFPLocalization.h"
 #include "SFPNumberFormatting.h"
 #include "Styling/CoreStyle.h"
+#include "UObject/SoftObjectPath.h"
 
 namespace
 {
-	const FVector2D NodeSize(560.0f, 280.0f);
+	FString CurrentGraphItemName(const FString& StoredName, const FString& ItemClassPath)
+	{
+		FString DisplayName = StoredName;
+		if (!ItemClassPath.IsEmpty() && !ItemClassPath.StartsWith(TEXT("SFP.")))
+		{
+			UClass* ItemClass = FSoftClassPath(ItemClassPath).ResolveClass();
+			if (IsValid(ItemClass) && ItemClass->IsChildOf(UFGItemDescriptor::StaticClass()))
+			{
+				const FString RuntimeName = UFGItemDescriptor::GetItemName(
+					TSubclassOf<UFGItemDescriptor>(ItemClass)).ToString();
+				if (!RuntimeName.IsEmpty())
+				{
+					DisplayName = RuntimeName;
+				}
+			}
+		}
+		return SFPLocalization::Translate(DisplayName);
+	}
+
+	const FVector2D NodeSize(560.0f, 344.0f);
 	constexpr float HorizontalSpacing = 1580.0f;
-	constexpr float VerticalSpacing = 500.0f;
+	constexpr float VerticalSpacing = 570.0f;
 	constexpr float ColumnHeaderHeight = 104.0f;
 	constexpr float EdgeLabelWidth = 650.0f;
 	constexpr float EdgeLabelHeight = 96.0f;
@@ -22,7 +43,9 @@ namespace
 	constexpr float EdgeRouteMargin = 30.0f;
 	constexpr float EdgeEndpointStubLength = 78.0f;
 	constexpr float WireTrackGap = 24.0f;
-	constexpr float ReverseEdgeOffset = 120.0f;
+	constexpr float FeedbackLaneTop = 64.0f;
+	constexpr float FeedbackLaneSpacing = 120.0f;
+	constexpr float FeedbackBandPadding = 20.0f;
 	constexpr float StandardPortTop = 122.0f;
 	constexpr float StandardPortBottom = 224.0f;
 	constexpr float RoutingPortTop = 170.0f;
@@ -137,7 +160,7 @@ namespace
 
 			while (!Trimmed.IsEmpty() && MeasureWidth(Trimmed + Ellipsis) > MaxWidth)
 			{
-				Trimmed.LeftChopInline(1, false);
+				Trimmed.LeftChopInline(1, EAllowShrinking::No);
 				Trimmed = Trimmed.TrimEnd();
 			}
 
@@ -401,6 +424,8 @@ void SSFPGraphPanel::RebuildLayout()
 	NodeRecipeTitles.Reset();
 	NodeMachineMeta.Reset();
 	NodeFooter.Reset();
+	NodeFooterSecondary.Reset();
+	NodeFooterTertiary.Reset();
 	InputPortsByNode.Reset();
 	OutputPortsByNode.Reset();
 	RoutingNodeIds.Reset();
@@ -409,6 +434,7 @@ void SSFPGraphPanel::RebuildLayout()
 	ColumnTitles.Reset();
 	GraphExtent = FVector2D::ZeroVector;
 	MaxLayoutColumn = 0;
+	FeedbackRouteCount = 0;
 	if (!Plan.IsValid())
 	{
 		return;
@@ -421,6 +447,8 @@ void SSFPGraphPanel::RebuildLayout()
 	NodeRecipeTitles.Reserve(Plan->Nodes.Num());
 	NodeMachineMeta.Reserve(Plan->Nodes.Num());
 	NodeFooter.Reserve(Plan->Nodes.Num());
+	NodeFooterSecondary.Reserve(Plan->Nodes.Num());
+	NodeFooterTertiary.Reserve(Plan->Nodes.Num());
 
 	TMap<int32, TArray<int32>> NodesByColumn;
 	TMap<int32, TArray<int32>> NeighboursByNode;
@@ -448,23 +476,75 @@ void SSFPGraphPanel::RebuildLayout()
 
 		if (Node.Type == ESFPPlanNodeType::Machine && Node.MachineCount > KINDA_SMALL_NUMBER)
 		{
-			const int32 BuiltMachines = FMath::Max(1, FMath::CeilToInt(Node.MachineCount));
-			const int32 FullMachines = FMath::FloorToInt(Node.MachineCount + KINDA_SMALL_NUMBER);
-			const double PartialPercent = FMath::Max(0.0, (Node.MachineCount - static_cast<double>(FullMachines)) * 100.0);
+			const int32 BuiltMachines = Node.BuiltMachineCount > 0
+				? Node.BuiltMachineCount
+				: FMath::Max(1, FMath::CeilToInt(Node.MachineCount));
+			const int32 FullMachines = Node.BuiltMachineCount > 0
+				? Node.FullClockMachineCount
+				: FMath::FloorToInt(Node.MachineCount + KINDA_SMALL_NUMBER);
+			const double FullClockPercent = Node.BuiltMachineCount > 0
+				? FMath::Max(0.0, Node.ConfiguredClockPercent)
+				: 100.0;
+			const double PartialPercent = Node.BuiltMachineCount > 0
+				? FMath::Max(0.0, Node.PartialClockPercent)
+				: FMath::Max(0.0, (Node.MachineCount - static_cast<double>(FullMachines)) * 100.0);
 			const FString ClockText = PartialPercent > 0.05
 				? (FullMachines > 0
-					? FString::Printf(TEXT("%d × 100 %% + 1 × %s %%"), FullMachines, *FSFPNumberFormatting::Decimal(PartialPercent, 1))
-					: FString::Printf(TEXT("1 × %s %%"), *FSFPNumberFormatting::Decimal(PartialPercent, 1)))
-				: FString::Printf(TEXT("%d × 100 %%"), BuiltMachines);
+					? FString::Printf(
+						TEXT("%d×%s%% + 1×%s%%"),
+						FullMachines,
+						*FSFPNumberFormatting::Decimal(FullClockPercent, 1),
+						*FSFPNumberFormatting::Decimal(PartialPercent, 1))
+					: FString::Printf(TEXT("1×%s%%"), *FSFPNumberFormatting::Decimal(PartialPercent, 1)))
+				: FString::Printf(TEXT("%d×%s%%"), BuiltMachines, *FSFPNumberFormatting::Decimal(FullClockPercent, 1));
 			NodeMachineMeta.Add(Node.Id, SFPLocalization::Text(FString::Printf(
 				TEXT("%s  ·  %d Maschinen"), *Node.Title, BuiltMachines)));
-			NodeFooter.Add(Node.Id, SFPLocalization::Text(FString::Printf(
-				TEXT("⚡ %s MW  |  %s"), *FSFPNumberFormatting::Decimal(Node.PowerMW, 2), *ClockText)));
+
+			const FString FooterPrimary = Node.bFuelPowered
+				? FString::Printf(
+					TEXT("BURN %s MW  |  %s %s/min"),
+					*FSFPNumberFormatting::Decimal(Node.PowerMW, 2),
+					*Node.FuelDisplayName,
+					*FSFPNumberFormatting::Decimal(Node.FuelRatePerMinute, 3))
+				: FString::Printf(
+					TEXT("⚡ %s MW"),
+					*FSFPNumberFormatting::Decimal(Node.PowerMW, 2));
+
+			FString FooterSecondary = ClockText;
+			if (Node.SomersloopCount > 0)
+			{
+				FooterSecondary += FString::Printf(
+					TEXT("  |  Sloop %d  |  Boost x%s"),
+					Node.SomersloopCount,
+					*FSFPNumberFormatting::Decimal(Node.ProductionBoost, 2));
+			}
+			NodeFooter.Add(Node.Id, SFPLocalization::Text(FooterPrimary));
+			NodeFooterSecondary.Add(Node.Id, SFPLocalization::Text(FooterSecondary));
+			NodeFooterTertiary.Add(Node.Id, FText::GetEmpty());
+		}
+		else if (Node.Type == ESFPPlanNodeType::Generator
+			&& Node.ProducedItemClassPath == TEXT("SFP.ElectricPower")
+			&& Node.BuiltMachineCount > 0)
+		{
+			TArray<FString> DetailLines;
+			Node.Detail.ParseIntoArrayLines(DetailLines, false);
+			const FString FuelLine = DetailLines.IsValidIndex(0) ? DetailLines[0] : Node.Detail;
+			const FString CountClockLine = DetailLines.IsValidIndex(1) ? DetailLines[1]
+				: FString::Printf(TEXT("%d Generatoren"), Node.BuiltMachineCount);
+			const FString PerGeneratorLine = DetailLines.IsValidIndex(2) ? DetailLines[2]
+				: FString::Printf(TEXT("%s MW Generatorleistung"), *FSFPNumberFormatting::Decimal(Node.PowerMW, 2));
+			const FString GrossNetLine = DetailLines.IsValidIndex(3) ? DetailLines[3] : FString();
+			NodeMachineMeta.Add(Node.Id, SFPLocalization::Text(FuelLine));
+			NodeFooter.Add(Node.Id, SFPLocalization::Text(CountClockLine));
+			NodeFooterSecondary.Add(Node.Id, SFPLocalization::Text(PerGeneratorLine));
+			NodeFooterTertiary.Add(Node.Id, SFPLocalization::Text(GrossNetLine));
 		}
 		else
 		{
 			NodeMachineMeta.Add(Node.Id, SFPLocalization::Text(Node.Detail));
 			NodeFooter.Add(Node.Id, FText::GetEmpty());
+			NodeFooterSecondary.Add(Node.Id, FText::GetEmpty());
+			NodeFooterTertiary.Add(Node.Id, FText::GetEmpty());
 		}
 		if (IsRoutingNodeType(Node.Type))
 		{
@@ -579,6 +659,49 @@ void SSFPGraphPanel::RebuildLayout()
 			NodeColumn = FMath::Max(NodeColumn, FirstConsumerColumn - 1);
 		}
 	}
+
+	// Connections to the same or an earlier production stage are genuine
+	// feedback flows. Route them through stable, dedicated lanes above the
+	// production stages instead of around the far right edge of the graph.
+	// The classification is based entirely on graph direction and therefore
+	// works for refinery loops and compatible mod recipes without item names.
+	TArray<bool> IsFeedbackEdge;
+	TArray<int32> FeedbackEdgeIndices;
+	TArray<int32> FeedbackLaneByEdge;
+	IsFeedbackEdge.Init(false, Plan->Edges.Num());
+	FeedbackLaneByEdge.Init(INDEX_NONE, Plan->Edges.Num());
+	for (int32 EdgeIndex = 0; EdgeIndex < Plan->Edges.Num(); ++EdgeIndex)
+	{
+		const int32* SourceColumn = NodeColumns.Find(Plan->Edges[EdgeIndex].SourceNodeId);
+		const int32* TargetColumn = NodeColumns.Find(Plan->Edges[EdgeIndex].TargetNodeId);
+		if (SourceColumn != nullptr && TargetColumn != nullptr && *TargetColumn <= *SourceColumn)
+		{
+			IsFeedbackEdge[EdgeIndex] = true;
+			FeedbackEdgeIndices.Add(EdgeIndex);
+		}
+	}
+	FeedbackEdgeIndices.Sort([&](const int32 LeftIndex, const int32 RightIndex)
+	{
+		const int32 LeftSpan = FMath::Abs(
+			NodeColumns.FindRef(Plan->Edges[LeftIndex].SourceNodeId)
+			- NodeColumns.FindRef(Plan->Edges[LeftIndex].TargetNodeId));
+		const int32 RightSpan = FMath::Abs(
+			NodeColumns.FindRef(Plan->Edges[RightIndex].SourceNodeId)
+			- NodeColumns.FindRef(Plan->Edges[RightIndex].TargetNodeId));
+		return LeftSpan == RightSpan ? LeftIndex < RightIndex : LeftSpan > RightSpan;
+	});
+	for (int32 LaneIndex = 0; LaneIndex < FeedbackEdgeIndices.Num(); ++LaneIndex)
+	{
+		FeedbackLaneByEdge[FeedbackEdgeIndices[LaneIndex]] = LaneIndex;
+	}
+	FeedbackRouteCount = FeedbackEdgeIndices.Num();
+	const float FeedbackBandBottom = FeedbackRouteCount > 0
+		? FeedbackLaneTop + static_cast<float>(FeedbackRouteCount - 1) * FeedbackLaneSpacing
+			+ EdgeLabelHeight + FeedbackBandPadding
+		: 0.0f;
+	const float GraphContentTop = FeedbackRouteCount > 0
+		? FeedbackBandBottom + 32.0f
+		: ColumnHeaderHeight;
 	for (const FSFPPlanNode& Node : Plan->Nodes)
 	{
 		NodesByColumn.FindOrAdd(NodeColumns.FindRef(Node.Id)).Add(Node.Id);
@@ -710,7 +833,7 @@ void SSFPGraphPanel::RebuildLayout()
 					/ static_cast<float>(NodeIds->Num() + 1)) - 1.0f;
 			FVector2D Position(
 				static_cast<float>(Column) * RouteColumnSpacing,
-				ColumnHeaderHeight + DistributedRowSlot * VerticalSpacing);
+				GraphContentTop + DistributedRowSlot * VerticalSpacing);
 			Position += ManualNodeOffsets.FindRef((*NodeIds)[Row]);
 			GraphPositions.Add((*NodeIds)[Row], Position);
 			GraphExtent.X = FMath::Max(GraphExtent.X, Position.X + NodeSize.X);
@@ -775,21 +898,28 @@ void SSFPGraphPanel::RebuildLayout()
 	}
 
 	EdgeLabels.Reserve(Plan->Edges.Num());
-	for (const FSFPPlanEdge& Edge : Plan->Edges)
+	for (int32 EdgeIndex = 0; EdgeIndex < Plan->Edges.Num(); ++EdgeIndex)
 	{
+		const FSFPPlanEdge& Edge = Plan->Edges[EdgeIndex];
+		const FString ItemName = CurrentGraphItemName(Edge.ItemName, Edge.ItemClassPath);
+		const FString FeedbackPrefix = IsFeedbackEdge.IsValidIndex(EdgeIndex) && IsFeedbackEdge[EdgeIndex]
+			? TEXT("↩ RÜCKFÜHRUNG · ")
+			: FString();
 		if (Edge.Form == TEXT("power"))
 		{
 			EdgeLabels.Add(SFPLocalization::Text(FString::Printf(
-				TEXT("%s · %s MW gesamt\n%s"),
-				*Edge.ItemName,
+				TEXT("%s%s · %s MW gesamt\n%s"),
+				*FeedbackPrefix,
+				*ItemName,
 				*FSFPNumberFormatting::Decimal(Edge.RatePerMinute, 2),
 				*Edge.TransportLabel)));
 		}
 		else
 		{
 			EdgeLabels.Add(SFPLocalization::Text(FString::Printf(
-				TEXT("%s · %s/min gesamt\n%s"),
-				*Edge.ItemName,
+				TEXT("%s%s · %s/min gesamt\n%s"),
+				*FeedbackPrefix,
+				*ItemName,
 				*FSFPNumberFormatting::Decimal(Edge.RatePerMinute),
 				*Edge.TransportLabel)));
 		}
@@ -798,6 +928,8 @@ void SSFPGraphPanel::RebuildLayout()
 	EdgeLayouts.SetNum(Plan->Edges.Num());
 	for (int32 EdgeIndex = 0; EdgeIndex < Plan->Edges.Num(); ++EdgeIndex)
 	{
+		EdgeLayouts[EdgeIndex].bFeedbackRoute =
+			IsFeedbackEdge.IsValidIndex(EdgeIndex) && IsFeedbackEdge[EdgeIndex];
 		const FSFPPlanEdge& Edge = Plan->Edges[EdgeIndex];
 		if (GraphPositions.Contains(Edge.SourceNodeId) && GraphPositions.Contains(Edge.TargetNodeId))
 		{
@@ -935,7 +1067,7 @@ void SSFPGraphPanel::RebuildLayout()
 				const FSFPPlanEdge& Edge = Plan->Edges[EdgeIndex];
 				TotalRate += Edge.RatePerMinute;
 				TotalLines += FMath::Max(0, Edge.RequiredLines);
-				if (ItemName.IsEmpty()) ItemName = Edge.ItemName;
+				if (ItemName.IsEmpty()) ItemName = CurrentGraphItemName(Edge.ItemName, Edge.ItemClassPath);
 				if (Form.IsEmpty()) Form = Edge.Form;
 				if (Transport.IsEmpty()) Transport = Edge.TransportLabel;
 				if (EdgeLayouts.IsValidIndex(EdgeIndex))
@@ -973,9 +1105,11 @@ void SSFPGraphPanel::RebuildLayout()
 		{
 			continue;
 		}
-		const int32 Lane = *TargetColumn > *SourceColumn
-			? *TargetColumn - 1
-			: MaxLayoutColumn + 1;
+		if (IsFeedbackEdge.IsValidIndex(EdgeIndex) && IsFeedbackEdge[EdgeIndex])
+		{
+			continue;
+		}
+		const int32 Lane = *TargetColumn - 1;
 		LabelLanes[EdgeIndex] = Lane;
 		DesiredLabelTops[EdgeIndex] =
 			(EdgeLayouts[EdgeIndex].SourceAnchor.Y + EdgeLayouts[EdgeIndex].TargetAnchor.Y) * 0.5f
@@ -1027,6 +1161,51 @@ void SSFPGraphPanel::RebuildLayout()
 		return Y;
 	};
 	const float NodeExtentX = static_cast<float>(MaxLayoutColumn) * RouteColumnSpacing + NodeSize.X;
+
+	// Feedback lanes are placed first and stay completely above every card.
+	// One lane per return prevents multiple loops from becoming an unreadable
+	// bundle. Labels sit directly on the return route and state its role.
+	for (const int32 EdgeIndex : FeedbackEdgeIndices)
+	{
+		if (!EdgeLayouts.IsValidIndex(EdgeIndex)) continue;
+		FEdgeLayout& Layout = EdgeLayouts[EdgeIndex];
+		const int32 LaneIndex = FeedbackLaneByEdge.IsValidIndex(EdgeIndex)
+			? FeedbackLaneByEdge[EdgeIndex]
+			: INDEX_NONE;
+		if (LaneIndex == INDEX_NONE) continue;
+		const float LaneTop = FeedbackLaneTop + static_cast<float>(LaneIndex) * FeedbackLaneSpacing;
+		const float LaneCenterY = LaneTop + EdgeLabelHeight * 0.5f;
+		const float SourceStubX = Layout.SourceAnchor.X + EdgeEndpointStubLength
+			+ SourceTracks[EdgeIndex] * WireTrackGap;
+		const float TargetStubX = Layout.TargetAnchor.X - EdgeEndpointStubLength
+			- TargetTracks[EdgeIndex] * WireTrackGap;
+		const float SpanLeft = FMath::Min(SourceStubX, TargetStubX);
+		const float SpanRight = FMath::Max(SourceStubX, TargetStubX);
+		const float FeedbackLabelWidth = FMath::Min(
+			EdgeLabelWidth,
+			FMath::Max(360.0f, SpanRight - SpanLeft - 2.0f * EdgeRouteMargin));
+		const float MaximumLabelLeft = FMath::Max(0.0f, NodeExtentX - FeedbackLabelWidth);
+		const float LabelLeft = FMath::Clamp(
+			(SpanLeft + SpanRight - FeedbackLabelWidth) * 0.5f,
+			0.0f,
+			MaximumLabelLeft);
+		Layout.LabelPosition = FVector2D(LabelLeft, LaneTop);
+		Layout.LabelSize = FVector2D(FeedbackLabelWidth, EdgeLabelHeight);
+		const float RouteLeftX = LabelLeft - EdgeRouteMargin;
+		const float RouteRightX = LabelLeft + FeedbackLabelWidth + EdgeRouteMargin;
+		Layout.RoutePoints = {
+			Layout.SourceAnchor,
+			FVector2D(SourceStubX, Layout.SourceAnchor.Y),
+			FVector2D(SourceStubX, LaneCenterY),
+			FVector2D(RouteRightX, LaneCenterY),
+			FVector2D(RouteLeftX, LaneCenterY),
+			FVector2D(TargetStubX, LaneCenterY),
+			FVector2D(TargetStubX, Layout.TargetAnchor.Y),
+			Layout.TargetAnchor
+		};
+		GraphExtent.X = FMath::Max(GraphExtent.X, static_cast<double>(FMath::Max(SourceStubX, RouteRightX) + WireTrackGap));
+		GraphExtent.Y = FMath::Max(GraphExtent.Y, static_cast<double>(FeedbackBandBottom));
+	}
 	for (TPair<int32, TArray<int32>>& Pair : EdgesByLabelLane)
 	{
 		Pair.Value.Sort([&](const int32 LeftIndex, const int32 RightIndex)
@@ -1044,11 +1223,8 @@ void SSFPGraphPanel::RebuildLayout()
 		{
 			FEdgeLayout& Layout = EdgeLayouts[EdgeIndex];
 			float LabelTop = FMath::Max(DesiredLabelTops[EdgeIndex], NextLabelTop);
-			const bool bForward = LabelLanes[EdgeIndex] <= MaxLayoutColumn;
-			const float LabelLeft = bForward
-				? static_cast<float>(LabelLanes[EdgeIndex] + 1) * RouteColumnSpacing
-					- EdgeLabelWidth - (2 * MaxTracks + 2) * WireTrackGap - EdgeEndpointStubLength
-				: NodeExtentX + ReverseEdgeOffset + (2 * MaxTracks + 4) * WireTrackGap;
+			const float LabelLeft = static_cast<float>(LabelLanes[EdgeIndex] + 1) * RouteColumnSpacing
+				- EdgeLabelWidth - (2 * MaxTracks + 2) * WireTrackGap - EdgeEndpointStubLength;
 			Layout.LabelPosition = FVector2D(LabelLeft, LabelTop);
 			Layout.LabelSize = FVector2D(EdgeLabelWidth, EdgeLabelHeight);
 			const float SourceStubX = Layout.SourceAnchor.X + EdgeEndpointStubLength + SourceTracks[EdgeIndex] * WireTrackGap;
@@ -1383,7 +1559,45 @@ int32 SSFPGraphPanel::OnPaint(
 		}
 	}
 
-	const int32 EdgeLayer = ColumnLayer + 3;
+	// A dedicated upper corridor makes circular material flow readable at a
+	// glance. It is visually separate from the left-to-right production stages,
+	// while every return keeps its material colour and direction markers.
+	if (FeedbackRouteCount > 0)
+	{
+		const float FeedbackBandGraphTop = FeedbackLaneTop - 10.0f;
+		const float FeedbackBandGraphBottom = FeedbackLaneTop
+			+ static_cast<float>(FeedbackRouteCount - 1) * FeedbackLaneSpacing
+			+ EdgeLabelHeight + FeedbackBandPadding;
+		const FVector2D FeedbackBandPosition = TransformGraphPoint(
+			FVector2D(0.0f, FeedbackBandGraphTop));
+		const FVector2D FeedbackBandSize(
+			GraphExtent.X * Zoom,
+			(FeedbackBandGraphBottom - FeedbackBandGraphTop) * Zoom);
+		FSlateDrawElement::MakeBox(
+			OutDrawElements,
+			ColumnLayer + 2,
+			AllottedGeometry.ToPaintGeometry(FeedbackBandSize, FSlateLayoutTransform(FeedbackBandPosition)),
+			WhiteBrush,
+			ESlateDrawEffect::None,
+			FLinearColor(0.22f, 0.14f, 0.035f, 0.26f));
+		if (Zoom >= 0.18f)
+		{
+			const FText FeedbackHeading = SFPLocalization::Text(
+				TEXT("↩ RÜCKFÜHRUNGEN · Nebenprodukte und Kreislaufmaterial zurück zu früheren Produktionsstufen"));
+			FSlateDrawElement::MakeText(
+				OutDrawElements,
+				ColumnLayer + 3,
+				AllottedGeometry.ToPaintGeometry(
+					FVector2D(FMath::Max(240.0, GraphExtent.X - 24.0), 24.0) * Zoom,
+					FSlateLayoutTransform(TransformGraphPoint(FVector2D(12.0f, FeedbackBandGraphTop + 3.0f)))),
+				FeedbackHeading,
+				FCoreStyle::GetDefaultFontStyle(TEXT("Bold"), FMath::Max(7, FMath::RoundToInt(9.0f * Zoom))),
+				ESlateDrawEffect::None,
+				FLinearColor(1.0f, 0.72f, 0.22f, 1.0f));
+		}
+	}
+
+	const int32 EdgeLayer = ColumnLayer + 4;
 	// Compact route captions remain readable independently of the large
 	// transport cards. Reserve visible geometry to avoid hiding other wires.
 	TArray<FSlateRect> CaptionObstacles;
@@ -1451,6 +1665,13 @@ int32 SSFPGraphPanel::OnPaint(
 		{
 			EdgeColor.A *= 0.18f;
 		}
+		FLinearColor EdgeOutline = Layout.bFeedbackRoute
+			? FLinearColor(1.0f, 0.64f, 0.12f, 0.98f)
+			: FLinearColor(0.004f, 0.008f, 0.012f, 0.98f);
+		if (bHoverFilter && !bHighlightedEdge)
+		{
+			EdgeOutline.A *= 0.18f;
+		}
 
 		FSlateDrawElement::MakeLines(
 			OutDrawElements,
@@ -1458,9 +1679,11 @@ int32 SSFPGraphPanel::OnPaint(
 			AllottedGeometry.ToPaintGeometry(),
 			Points,
 			ESlateDrawEffect::None,
-			FLinearColor(0.004f, 0.008f, 0.012f, 0.98f),
+			EdgeOutline,
 			true,
-			FMath::Max(3.8f, 5.5f * Zoom));
+			Layout.bFeedbackRoute
+				? FMath::Max(5.2f, 7.0f * Zoom)
+				: FMath::Max(3.8f, 5.5f * Zoom));
 		FSlateDrawElement::MakeLines(
 			OutDrawElements,
 			EdgeLayer,
@@ -1614,7 +1837,9 @@ int32 SSFPGraphPanel::OnPaint(
 					FSlateLayoutTransform(LabelPosition)),
 				WhiteBrush,
 				ESlateDrawEffect::None,
-				FLinearColor(0.012f, 0.018f, 0.027f, 0.96f));
+				Layout.bFeedbackRoute
+					? FLinearColor(0.12f, 0.075f, 0.018f, 0.98f)
+					: FLinearColor(0.012f, 0.018f, 0.027f, 0.96f));
 
 			FSlateDrawElement::MakeBox(
 				OutDrawElements,
@@ -1624,7 +1849,9 @@ int32 SSFPGraphPanel::OnPaint(
 					FSlateLayoutTransform(LabelPosition)),
 				WhiteBrush,
 				ESlateDrawEffect::None,
-				EdgeColor);
+				Layout.bFeedbackRoute
+					? FLinearColor(1.0f, 0.66f, 0.14f, EdgeColor.A)
+					: EdgeColor);
 
 			FSlateDrawElement::MakeText(
 				OutDrawElements,
@@ -1652,6 +1879,8 @@ int32 SSFPGraphPanel::OnPaint(
 		const FText* RecipeTitle = NodeRecipeTitles.Find(Node.Id);
 		const FText* MachineMeta = NodeMachineMeta.Find(Node.Id);
 		const FText* Footer = NodeFooter.Find(Node.Id);
+		const FText* FooterSecondary = NodeFooterSecondary.Find(Node.Id);
+		const FText* FooterTertiary = NodeFooterTertiary.Find(Node.Id);
 
 		const FVector2D PaintedSize = NodeSize * Zoom;
 		if (Position.X + PaintedSize.X < 0.0f || Position.X > ViewSize.X
@@ -1776,8 +2005,10 @@ int32 SSFPGraphPanel::OnPaint(
 		}
 		if (!IsRoutingNodeType(Node.Type) && bShowNodeDetails)
 		{
-			static const FText InputHeader = SFPLocalization::Text(TEXT("EINGÄNGE"));
-			static const FText OutputHeader = SFPLocalization::Text(TEXT("AUSGÄNGE"));
+			// Culture-dependent graph text must follow a language switch made while
+			// the game process is still running instead of retaining first-paint text.
+			const FText InputHeader = SFPLocalization::Text(TEXT("EINGÄNGE"));
+			const FText OutputHeader = SFPLocalization::Text(TEXT("AUSGÄNGE"));
 			FSlateDrawElement::MakeText(OutDrawElements, NodeLayer + 4,
 				AllottedGeometry.ToPaintGeometry(FVector2D(245.0f, 24.0f) * Zoom, FSlateLayoutTransform(Position + FVector2D(14.0f, SectionHeaderTop) * Zoom)),
 				InputHeader, FCoreStyle::GetDefaultFontStyle(TEXT("Bold"), FMath::Max(7, FMath::RoundToInt(8.0f * Zoom))), ESlateDrawEffect::None,
@@ -1810,12 +2041,26 @@ int32 SSFPGraphPanel::OnPaint(
 		if (Footer != nullptr && !Footer->IsEmpty() && bShowNodeDetails)
 		{
 			FSlateDrawElement::MakeBox(OutDrawElements, NodeLayer + 3,
-				AllottedGeometry.ToPaintGeometry(FVector2D((NodeSize.X - 20.0f) * Zoom, 1.0f), FSlateLayoutTransform(Position + FVector2D(10.0f, NodeSize.Y - 43.0f) * Zoom)),
+				AllottedGeometry.ToPaintGeometry(FVector2D((NodeSize.X - 20.0f) * Zoom, 1.0f), FSlateLayoutTransform(Position + FVector2D(10.0f, NodeSize.Y - 96.0f) * Zoom)),
 				WhiteBrush, ESlateDrawEffect::None, FLinearColor(0.35f, 0.42f, 0.48f, 0.7f));
 			FSlateDrawElement::MakeText(OutDrawElements, NodeLayer + 4,
-				AllottedGeometry.ToPaintGeometry(FVector2D(NodeSize.X - 24.0f, 28.0f) * Zoom, FSlateLayoutTransform(Position + FVector2D(12.0f, NodeSize.Y - 34.0f) * Zoom)),
+				AllottedGeometry.ToPaintGeometry(FVector2D(NodeSize.X - 24.0f, 24.0f) * Zoom, FSlateLayoutTransform(Position + FVector2D(12.0f, NodeSize.Y - 86.0f) * Zoom)),
 				*Footer, FCoreStyle::GetDefaultFontStyle(TEXT("Regular"), FMath::Max(7, FMath::RoundToInt(8.5f * Zoom))), ESlateDrawEffect::None,
 				FLinearColor(0.96f, 0.80f, 0.34f, 1.0f));
+			if (FooterSecondary != nullptr && !FooterSecondary->IsEmpty())
+			{
+				FSlateDrawElement::MakeText(OutDrawElements, NodeLayer + 4,
+					AllottedGeometry.ToPaintGeometry(FVector2D(NodeSize.X - 24.0f, 24.0f) * Zoom, FSlateLayoutTransform(Position + FVector2D(12.0f, NodeSize.Y - 62.0f) * Zoom)),
+					*FooterSecondary, FCoreStyle::GetDefaultFontStyle(TEXT("Regular"), FMath::Max(7, FMath::RoundToInt(8.5f * Zoom))), ESlateDrawEffect::None,
+					FLinearColor(0.78f, 0.84f, 0.90f, 1.0f));
+			}
+			if (FooterTertiary != nullptr && !FooterTertiary->IsEmpty())
+			{
+				FSlateDrawElement::MakeText(OutDrawElements, NodeLayer + 4,
+					AllottedGeometry.ToPaintGeometry(FVector2D(NodeSize.X - 24.0f, 24.0f) * Zoom, FSlateLayoutTransform(Position + FVector2D(12.0f, NodeSize.Y - 38.0f) * Zoom)),
+					*FooterTertiary, FCoreStyle::GetDefaultFontStyle(TEXT("Regular"), FMath::Max(7, FMath::RoundToInt(8.5f * Zoom))), ESlateDrawEffect::None,
+					FLinearColor(0.72f, 0.80f, 0.88f, 1.0f));
+			}
 		}
 
 		if (bShowRoutingSymbols && IsRoutingNodeType(Node.Type))
@@ -1913,10 +2158,10 @@ int32 SSFPGraphPanel::OnPaint(
 		DrawPort(EdgeLayouts[EdgeIndex].TargetAnchor);
 	}
 
-	static const FText NavigationHelp = SFPLocalization::Text(
+	const FText NavigationHelp = SFPLocalization::Text(
 		TEXT("Mausrad: Zoom  ·  Mittlere/rechte Maustaste: verschieben  ·  Doppelklick: einpassen"));
-	static const FText ColourHelp = SFPLocalization::Text(
-		TEXT("Gleiche Farbe = gleiches Material  ·  Gelb: Strom  ·  Blau: Flüssigkeit  ·  Violett: Gas  ·  Türkis: lokaler Miner"));
+	const FText ColourHelp = SFPLocalization::Text(
+		TEXT("Gleiche Farbe = gleiches Material  ·  Gelb: Strom  ·  Goldener Rücklaufkorridor: Rückführung"));
 	const FVector2D HelpSize(FMath::Min(760.0, FMath::Max(260.0, ViewSize.X - 24.0)), 42.0);
 	const FVector2D HelpPosition(12.0, FMath::Max(0.0, ViewSize.Y - HelpSize.Y - 10.0));
 	FSlateDrawElement::MakeBox(

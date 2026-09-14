@@ -32,6 +32,11 @@ public:
 		return PowerGenerators;
 	}
 
+	const FSFPAlienPowerAugmenterOption& GetAlienPowerAugmenter() const
+	{
+		return AlienPowerAugmenter;
+	}
+
 	void GetRecipeOptionsForItemPath(
 		const FString& ItemClassPath,
 		bool bOnlyAvailableRecipes,
@@ -44,7 +49,8 @@ public:
 		const TMap<FString, FString>& RecipeOverrides,
 		double EstimatedConnectionLengthMeters,
 		const FString& SelectedConveyorClassPath = FString(),
-		const FString& SelectedConveyorLiftClassPath = FString()) const;
+		const FString& SelectedConveyorLiftClassPath = FString(),
+		const TMap<FString, FSFPMachinePlanSettings>& MachineSettings = TMap<FString, FSFPMachinePlanSettings>()) const;
 
 	/** Solves all end products in one shared graph so common intermediate production is merged. */
 	FSFPPlanResult Solve(
@@ -55,7 +61,8 @@ public:
 		const FString& SelectedConveyorClassPath = FString(),
 		const FString& SelectedConveyorLiftClassPath = FString(),
 		const TMap<FString, double>& SuppliedInputs = TMap<FString, double>(),
-		bool bEnforceSupplyLimits = true) const;
+		bool bEnforceSupplyLimits = true,
+		const TMap<FString, FSFPMachinePlanSettings>& MachineSettings = TMap<FString, FSFPMachinePlanSettings>()) const;
 
 	/** Builds generator, fuel, supplemental-resource and complete upstream production chains. */
 	FSFPPlanResult SolvePower(const FSFPPowerPlanRequest& Request) const;
@@ -104,6 +111,9 @@ private:
 	void BuildPowerGeneratorCatalog(
 		const TArray<TSubclassOf<UFGRecipe>>& AllRecipes,
 		AFGRecipeManager* RecipeManager);
+	void BuildAlienPowerAugmenterCatalog(
+		const TArray<TSubclassOf<UFGRecipe>>& AllRecipes,
+		AFGRecipeManager* RecipeManager);
 	void BuildOptionalPowerGeneratorCatalog(
 		const TArray<TSubclassOf<UFGRecipe>>& AllRecipes,
 		AFGRecipeManager* RecipeManager);
@@ -119,6 +129,7 @@ private:
 	TSet<FString> AvailableRecipeClassPaths;
 	TArray<FSFPTransportTier> TransportTiers;
 	TArray<TSharedPtr<FSFPPowerGeneratorOption>> PowerGenerators;
+	FSFPAlienPowerAugmenterOption AlienPowerAugmenter;
 	TMap<FString, TArray<FSFPConstructionCost>> ConstructionCostsByMachinePath;
 	FString SplitterClassPath;
 	FString SplitterDisplayName;

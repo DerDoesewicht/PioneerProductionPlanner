@@ -11,7 +11,7 @@
 
 namespace
 {
-	constexpr int32 SFPPlanFileSchemaVersion = 6;
+	constexpr int32 SFPPlanFileSchemaVersion = 9;
 	constexpr int32 SFPMaxPlanNameLength = 80;
 	constexpr int32 SFPMaxSharedPlans = 100;
 	constexpr int32 SFPMaxSharedPlanNodes = 5000;
@@ -48,7 +48,19 @@ namespace
 		Json->SetStringField(TEXT("recipeClassPath"), Node.RecipeClassPath);
 		Json->SetNumberField(TEXT("ratePerMinute"), Node.RatePerMinute);
 		Json->SetNumberField(TEXT("machineCount"), Node.MachineCount);
+		Json->SetNumberField(TEXT("builtMachineCount"), Node.BuiltMachineCount);
+		Json->SetNumberField(TEXT("fullClockMachineCount"), Node.FullClockMachineCount);
+		Json->SetNumberField(TEXT("configuredClockPercent"), Node.ConfiguredClockPercent);
+		Json->SetNumberField(TEXT("partialClockPercent"), Node.PartialClockPercent);
+		Json->SetNumberField(TEXT("somersloopCount"), Node.SomersloopCount);
+		Json->SetNumberField(TEXT("productionBoost"), Node.ProductionBoost);
 		Json->SetNumberField(TEXT("powerMW"), Node.PowerMW);
+		Json->SetBoolField(TEXT("fuelPowered"), Node.bFuelPowered);
+		Json->SetStringField(TEXT("fuelClassPath"), Node.FuelClassPath);
+		Json->SetStringField(TEXT("fuelDisplayName"), Node.FuelDisplayName);
+		Json->SetStringField(TEXT("fuelForm"), Node.FuelForm);
+		Json->SetNumberField(TEXT("fuelEnergyValueMJ"), Node.FuelEnergyValueMJ);
+		Json->SetNumberField(TEXT("fuelRatePerMinute"), Node.FuelRatePerMinute);
 		Json->SetNumberField(TEXT("infrastructureCount"), Node.InfrastructureCount);
 		return Json;
 	}
@@ -136,7 +148,28 @@ namespace
 		Json->TryGetStringField(TEXT("recipeClassPath"), OutNode.RecipeClassPath);
 		Json->TryGetNumberField(TEXT("ratePerMinute"), OutNode.RatePerMinute);
 		Json->TryGetNumberField(TEXT("machineCount"), OutNode.MachineCount);
+		if (Json->TryGetNumberField(TEXT("builtMachineCount"), Number) && IsFiniteInt32(Number))
+		{
+			OutNode.BuiltMachineCount = FMath::Max(0, FMath::RoundToInt(Number));
+		}
+		if (Json->TryGetNumberField(TEXT("fullClockMachineCount"), Number) && IsFiniteInt32(Number))
+		{
+			OutNode.FullClockMachineCount = FMath::Max(0, FMath::RoundToInt(Number));
+		}
+		Json->TryGetNumberField(TEXT("configuredClockPercent"), OutNode.ConfiguredClockPercent);
+		Json->TryGetNumberField(TEXT("partialClockPercent"), OutNode.PartialClockPercent);
+		if (Json->TryGetNumberField(TEXT("somersloopCount"), Number) && IsFiniteInt32(Number))
+		{
+			OutNode.SomersloopCount = FMath::Max(0, FMath::RoundToInt(Number));
+		}
+		Json->TryGetNumberField(TEXT("productionBoost"), OutNode.ProductionBoost);
 		Json->TryGetNumberField(TEXT("powerMW"), OutNode.PowerMW);
+		Json->TryGetBoolField(TEXT("fuelPowered"), OutNode.bFuelPowered);
+		Json->TryGetStringField(TEXT("fuelClassPath"), OutNode.FuelClassPath);
+		Json->TryGetStringField(TEXT("fuelDisplayName"), OutNode.FuelDisplayName);
+		Json->TryGetStringField(TEXT("fuelForm"), OutNode.FuelForm);
+		Json->TryGetNumberField(TEXT("fuelEnergyValueMJ"), OutNode.FuelEnergyValueMJ);
+		Json->TryGetNumberField(TEXT("fuelRatePerMinute"), OutNode.FuelRatePerMinute);
 		if (Json->TryGetNumberField(TEXT("infrastructureCount"), Number) && IsFiniteInt32(Number))
 		{
 			OutNode.InfrastructureCount = FMath::Max(0, FMath::RoundToInt(Number));
@@ -209,11 +242,12 @@ namespace
 			|| Plan.Nodes.Num() > SFPMaxSharedPlanNodes
 			|| Plan.Edges.Num() > SFPMaxSharedPlanEdges
 			|| Plan.RecipeOverrides.Num() > 5000
+			|| Plan.MachineSettings.Num() > 5000
 			|| Plan.AvailableInputRates.Num() > 5000
 			|| Plan.Warnings.Num() > 512)
 		{
 			OutError = FString::Printf(
-				TEXT("Der Serverplan ist zu groß (%d/%d Ziele, %d/%d Knoten, %d/%d Verbindungen)"),
+				TEXT("Der Multiplayer-Plan ist zu groß (%d/%d Ziele, %d/%d Knoten, %d/%d Verbindungen)"),
 				Plan.Targets.Num(),
 				SFPMaxSharedPlanTargets,
 				Plan.Nodes.Num(),
@@ -222,14 +256,31 @@ namespace
 				SFPMaxSharedPlanEdges);
 			return false;
 		}
+		if (Plan.PassiveAlienPowerAugmenters < 0
+			|| Plan.FueledAlienPowerAugmenters < 0
+			|| Plan.PassiveAlienPowerAugmenters > 10000
+			|| Plan.FueledAlienPowerAugmenters > 10000)
+		{
+			OutError = TEXT("Der Multiplayer-Plan enthält eine ungültige Anzahl Alien Power Augmenter");
+			return false;
+		}
+
 		const double ScalarValues[] = {
 			Plan.TargetRatePerMinute,
 			Plan.TotalEquivalentMachines,
 			Plan.TotalBasePowerMW,
 			Plan.RequestedNetPowerMW,
 			Plan.PowerReservePercent,
+			Plan.GeneratorBasePowerMW,
 			Plan.GeneratorPowerMW,
 			Plan.EquivalentGeneratorCount,
+			Plan.ConfiguredGeneratorClockPercent,
+			Plan.PartialGeneratorClockPercent,
+			Plan.BaseGeneratorGrossPowerMW,
+			Plan.AlienPowerAugmenterBaseMW,
+			Plan.AlienPowerMultiplier,
+			Plan.AlienPowerContributionMW,
+			Plan.AlienPowerMatrixRatePerMinute,
 			Plan.GrossPowerMW,
 			Plan.SelfConsumptionPowerMW,
 			Plan.NetPowerMW,
@@ -245,7 +296,7 @@ namespace
 		{
 			if (!FMath::IsFinite(Value) || FMath::Abs(Value) > 1.0e15)
 			{
-				OutError = TEXT("Der Serverplan enthält einen ungültigen Zahlenwert");
+				OutError = TEXT("Der Multiplayer-Plan enthält einen ungültigen Zahlenwert");
 				return false;
 			}
 		}
@@ -259,7 +310,7 @@ namespace
 				|| Target.RatePerMinute <= 0.0
 				|| Target.RatePerMinute > 1.0e12)
 			{
-				OutError = TEXT("Der Serverplan enthält ein ungültiges Ziel");
+				OutError = TEXT("Der Multiplayer-Plan enthält ein ungültiges Ziel");
 				return false;
 			}
 		}
@@ -277,14 +328,30 @@ namespace
 				|| Node.RecipeClassPath.Len() > 1024
 				|| !FMath::IsFinite(Node.RatePerMinute)
 				|| !FMath::IsFinite(Node.MachineCount)
+				|| !FMath::IsFinite(Node.ConfiguredClockPercent)
+				|| !FMath::IsFinite(Node.PartialClockPercent)
+				|| !FMath::IsFinite(Node.ProductionBoost)
 				|| !FMath::IsFinite(Node.PowerMW)
+				|| !FMath::IsFinite(Node.FuelEnergyValueMJ)
+				|| !FMath::IsFinite(Node.FuelRatePerMinute)
 				|| FMath::Abs(Node.RatePerMinute) > 1.0e12
 				|| FMath::Abs(Node.MachineCount) > 1.0e9
+				|| Node.BuiltMachineCount < 0 || Node.BuiltMachineCount > 1000000
+				|| Node.FullClockMachineCount < 0 || Node.FullClockMachineCount > 1000000
+				|| Node.ConfiguredClockPercent < 0.0 || Node.ConfiguredClockPercent > 100000.0
+				|| Node.PartialClockPercent < 0.0 || Node.PartialClockPercent > 100000.0
+				|| Node.SomersloopCount < 0 || Node.SomersloopCount > 1024
+				|| Node.ProductionBoost <= 0.0 || Node.ProductionBoost > 10000.0
 				|| FMath::Abs(Node.PowerMW) > 1.0e12
+				|| Node.FuelClassPath.Len() > 1024
+				|| Node.FuelDisplayName.Len() > 256
+				|| Node.FuelForm.Len() > 64
+				|| Node.FuelEnergyValueMJ < 0.0 || Node.FuelEnergyValueMJ > 1.0e15
+				|| Node.FuelRatePerMinute < 0.0 || Node.FuelRatePerMinute > 1.0e12
 				|| Node.InfrastructureCount < 0
 				|| Node.InfrastructureCount > 1000000)
 			{
-				OutError = TEXT("Der Serverplan enthält einen ungültigen oder doppelten Knoten");
+				OutError = TEXT("Der Multiplayer-Plan enthält einen ungültigen oder doppelten Knoten");
 				return false;
 			}
 			NodeIds.Add(Node.Id);
@@ -309,7 +376,7 @@ namespace
 				|| Edge.EstimatedLengthMeters < 0.0
 				|| Edge.EstimatedLengthMeters > 1.0e9)
 			{
-				OutError = TEXT("Der Serverplan enthält eine ungültige Verbindung");
+				OutError = TEXT("Der Multiplayer-Plan enthält eine ungültige Verbindung");
 				return false;
 			}
 		}
@@ -321,7 +388,7 @@ namespace
 				|| Input.Value < 0.0
 				|| Input.Value > 1.0e12)
 			{
-				OutError = TEXT("Der Serverplan enthält ein ungültiges Rohstofflimit");
+				OutError = TEXT("Der Multiplayer-Plan enthält ein ungültiges Rohstofflimit");
 				return false;
 			}
 		}
@@ -329,7 +396,22 @@ namespace
 		{
 			if (Override.Key.Len() > 1024 || Override.Value.Len() > 1024)
 			{
-				OutError = TEXT("Der Serverplan enthält einen ungültigen Rezeptpfad");
+				OutError = TEXT("Der Multiplayer-Plan enthält einen ungültigen Rezeptpfad");
+				return false;
+			}
+		}
+		for (const TPair<FString, FSFPMachinePlanSettings>& Pair : Plan.MachineSettings)
+		{
+			const FSFPMachinePlanSettings& Settings = Pair.Value;
+			if (Pair.Key.Len() > 1024
+				|| Settings.FuelClassPath.Len() > 1024
+				|| !FMath::IsFinite(Settings.ClockPercent)
+				|| Settings.ClockPercent < 0.1
+				|| Settings.ClockPercent > 100000.0
+				|| Settings.SomersloopCount < 0
+				|| Settings.SomersloopCount > 1024)
+			{
+				OutError = TEXT("Der Multiplayer-Plan enthält eine ungültige Maschinenkonfiguration");
 				return false;
 			}
 		}
@@ -337,7 +419,7 @@ namespace
 		{
 			if (Costs.Num() > 10000)
 			{
-				OutError = TEXT("Der Serverplan enthält zu viele Baukosteneinträge");
+				OutError = TEXT("Der Multiplayer-Plan enthält zu viele Baukosteneinträge");
 				return false;
 			}
 			for (const FSFPConstructionCost& Cost : Costs)
@@ -349,7 +431,7 @@ namespace
 					|| Cost.Amount < 0.0
 					|| Cost.Amount > 1.0e15)
 				{
-					OutError = TEXT("Der Serverplan enthält ungültige Baukosten");
+					OutError = TEXT("Der Multiplayer-Plan enthält ungültige Baukosten");
 					return false;
 				}
 			}
@@ -365,7 +447,7 @@ namespace
 		{
 			if (Warning.Len() > 4096)
 			{
-				OutError = TEXT("Der Serverplan enthält einen zu langen Hinweistext");
+				OutError = TEXT("Der Multiplayer-Plan enthält einen zu langen Hinweistext");
 				return false;
 			}
 		}
@@ -444,14 +526,27 @@ namespace
 		Root->SetNumberField(TEXT("powerReservePercent"), Plan.PowerReservePercent);
 		Root->SetStringField(TEXT("requestedGeneratorClassPath"), Plan.RequestedGeneratorClassPath);
 		Root->SetStringField(TEXT("requestedFuelClassPath"), Plan.RequestedFuelClassPath);
+		Root->SetNumberField(TEXT("passiveAlienPowerAugmenters"), Plan.PassiveAlienPowerAugmenters);
+		Root->SetNumberField(TEXT("fueledAlienPowerAugmenters"), Plan.FueledAlienPowerAugmenters);
 		Root->SetStringField(TEXT("selectedGeneratorClassPath"), Plan.SelectedGeneratorClassPath);
 		Root->SetStringField(TEXT("selectedGeneratorDisplayName"), Plan.SelectedGeneratorDisplayName);
 		Root->SetStringField(TEXT("selectedFuelClassPath"), Plan.SelectedFuelClassPath);
 		Root->SetStringField(TEXT("selectedFuelDisplayName"), Plan.SelectedFuelDisplayName);
 		Root->SetStringField(TEXT("selectedFuelForm"), Plan.SelectedFuelForm);
+		Root->SetNumberField(TEXT("generatorBasePowerMW"), Plan.GeneratorBasePowerMW);
 		Root->SetNumberField(TEXT("generatorPowerMW"), Plan.GeneratorPowerMW);
 		Root->SetNumberField(TEXT("equivalentGeneratorCount"), Plan.EquivalentGeneratorCount);
 		Root->SetNumberField(TEXT("builtGeneratorCount"), Plan.BuiltGeneratorCount);
+		Root->SetNumberField(TEXT("fullClockGeneratorCount"), Plan.FullClockGeneratorCount);
+		Root->SetNumberField(TEXT("configuredGeneratorClockPercent"), Plan.ConfiguredGeneratorClockPercent);
+		Root->SetNumberField(TEXT("partialGeneratorClockPercent"), Plan.PartialGeneratorClockPercent);
+		Root->SetNumberField(TEXT("baseGeneratorGrossPowerMW"), Plan.BaseGeneratorGrossPowerMW);
+		Root->SetNumberField(TEXT("alienPowerAugmenterBaseMW"), Plan.AlienPowerAugmenterBaseMW);
+		Root->SetNumberField(TEXT("alienPowerMultiplier"), Plan.AlienPowerMultiplier);
+		Root->SetNumberField(TEXT("alienPowerContributionMW"), Plan.AlienPowerContributionMW);
+		Root->SetStringField(TEXT("alienPowerMatrixItemClassPath"), Plan.AlienPowerMatrixItemClassPath);
+		Root->SetStringField(TEXT("alienPowerMatrixDisplayName"), Plan.AlienPowerMatrixDisplayName);
+		Root->SetNumberField(TEXT("alienPowerMatrixRatePerMinute"), Plan.AlienPowerMatrixRatePerMinute);
 		Root->SetNumberField(TEXT("grossPowerMW"), Plan.GrossPowerMW);
 		Root->SetNumberField(TEXT("selfConsumptionPowerMW"), Plan.SelfConsumptionPowerMW);
 		Root->SetNumberField(TEXT("netPowerMW"), Plan.NetPowerMW);
@@ -536,6 +631,17 @@ namespace
 			RecipeOverrides->SetStringField(Pair.Key, Pair.Value);
 		}
 		Root->SetObjectField(TEXT("recipeOverrides"), RecipeOverrides);
+
+		TSharedRef<FJsonObject> MachineSettings = MakeShared<FJsonObject>();
+		for (const TPair<FString, FSFPMachinePlanSettings>& Pair : Plan.MachineSettings)
+		{
+			TSharedRef<FJsonObject> Settings = MakeShared<FJsonObject>();
+			Settings->SetNumberField(TEXT("clockPercent"), Pair.Value.ClockPercent);
+			Settings->SetNumberField(TEXT("somersloopCount"), Pair.Value.SomersloopCount);
+			Settings->SetStringField(TEXT("fuelClassPath"), Pair.Value.FuelClassPath);
+			MachineSettings->SetObjectField(Pair.Key, Settings);
+		}
+		Root->SetObjectField(TEXT("machineSettings"), MachineSettings);
 
 		TSharedRef<FJsonObject> AvailableInputRates = MakeShared<FJsonObject>();
 		for (const TPair<FString, double>& Pair : Plan.AvailableInputRates)
@@ -703,17 +809,49 @@ namespace
 		Root->TryGetNumberField(TEXT("powerReservePercent"), Plan->PowerReservePercent);
 		Root->TryGetStringField(TEXT("requestedGeneratorClassPath"), Plan->RequestedGeneratorClassPath);
 		Root->TryGetStringField(TEXT("requestedFuelClassPath"), Plan->RequestedFuelClassPath);
+		if (Root->TryGetNumberField(TEXT("passiveAlienPowerAugmenters"), SummaryNumber) && IsFiniteInt32(SummaryNumber))
+		{
+			Plan->PassiveAlienPowerAugmenters = FMath::Max(0, FMath::RoundToInt(SummaryNumber));
+		}
+		if (Root->TryGetNumberField(TEXT("fueledAlienPowerAugmenters"), SummaryNumber) && IsFiniteInt32(SummaryNumber))
+		{
+			Plan->FueledAlienPowerAugmenters = FMath::Max(0, FMath::RoundToInt(SummaryNumber));
+		}
 		Root->TryGetStringField(TEXT("selectedGeneratorClassPath"), Plan->SelectedGeneratorClassPath);
 		Root->TryGetStringField(TEXT("selectedGeneratorDisplayName"), Plan->SelectedGeneratorDisplayName);
 		Root->TryGetStringField(TEXT("selectedFuelClassPath"), Plan->SelectedFuelClassPath);
 		Root->TryGetStringField(TEXT("selectedFuelDisplayName"), Plan->SelectedFuelDisplayName);
 		Root->TryGetStringField(TEXT("selectedFuelForm"), Plan->SelectedFuelForm);
+		Root->TryGetNumberField(TEXT("generatorBasePowerMW"), Plan->GeneratorBasePowerMW);
 		Root->TryGetNumberField(TEXT("generatorPowerMW"), Plan->GeneratorPowerMW);
 		Root->TryGetNumberField(TEXT("equivalentGeneratorCount"), Plan->EquivalentGeneratorCount);
+		SummaryNumber = 0.0;
 		if (Root->TryGetNumberField(TEXT("builtGeneratorCount"), SummaryNumber) && IsFiniteInt32(SummaryNumber))
 		{
 			Plan->BuiltGeneratorCount = FMath::Max(0, FMath::RoundToInt(SummaryNumber));
 		}
+		SummaryNumber = 0.0;
+		if (Root->TryGetNumberField(TEXT("fullClockGeneratorCount"), SummaryNumber) && IsFiniteInt32(SummaryNumber))
+		{
+			Plan->FullClockGeneratorCount = FMath::Max(0, FMath::RoundToInt(SummaryNumber));
+		}
+		Root->TryGetNumberField(TEXT("configuredGeneratorClockPercent"), Plan->ConfiguredGeneratorClockPercent);
+		Root->TryGetNumberField(TEXT("partialGeneratorClockPercent"), Plan->PartialGeneratorClockPercent);
+		if (!FMath::IsFinite(Plan->ConfiguredGeneratorClockPercent) || Plan->ConfiguredGeneratorClockPercent <= 0.0)
+		{
+			Plan->ConfiguredGeneratorClockPercent = 100.0;
+		}
+		if (Plan->GeneratorBasePowerMW <= KINDA_SMALL_NUMBER && Plan->GeneratorPowerMW > KINDA_SMALL_NUMBER)
+		{
+			Plan->GeneratorBasePowerMW = Plan->GeneratorPowerMW * 100.0 / Plan->ConfiguredGeneratorClockPercent;
+		}
+		Root->TryGetNumberField(TEXT("baseGeneratorGrossPowerMW"), Plan->BaseGeneratorGrossPowerMW);
+		Root->TryGetNumberField(TEXT("alienPowerAugmenterBaseMW"), Plan->AlienPowerAugmenterBaseMW);
+		Root->TryGetNumberField(TEXT("alienPowerMultiplier"), Plan->AlienPowerMultiplier);
+		Root->TryGetNumberField(TEXT("alienPowerContributionMW"), Plan->AlienPowerContributionMW);
+		Root->TryGetStringField(TEXT("alienPowerMatrixItemClassPath"), Plan->AlienPowerMatrixItemClassPath);
+		Root->TryGetStringField(TEXT("alienPowerMatrixDisplayName"), Plan->AlienPowerMatrixDisplayName);
+		Root->TryGetNumberField(TEXT("alienPowerMatrixRatePerMinute"), Plan->AlienPowerMatrixRatePerMinute);
 		Root->TryGetNumberField(TEXT("grossPowerMW"), Plan->GrossPowerMW);
 		Root->TryGetNumberField(TEXT("selfConsumptionPowerMW"), Plan->SelfConsumptionPowerMW);
 		Root->TryGetNumberField(TEXT("netPowerMW"), Plan->NetPowerMW);
@@ -895,6 +1033,31 @@ namespace
 				if (Pair.Value.IsValid() && Pair.Value->Type == EJson::String)
 				{
 					Plan->RecipeOverrides.Add(Pair.Key, Pair.Value->AsString());
+				}
+			}
+		}
+
+		const TSharedPtr<FJsonObject>* MachineSettingsObject = nullptr;
+		if (Root->TryGetObjectField(TEXT("machineSettings"), MachineSettingsObject)
+			&& MachineSettingsObject != nullptr
+			&& MachineSettingsObject->IsValid())
+		{
+			for (const TPair<FString, TSharedPtr<FJsonValue>>& Pair : (*MachineSettingsObject)->Values)
+			{
+				if (!Pair.Value.IsValid() || Pair.Value->Type != EJson::Object) continue;
+				const TSharedPtr<FJsonObject> SettingsJson = Pair.Value->AsObject();
+				if (!SettingsJson.IsValid()) continue;
+				FSFPMachinePlanSettings Settings;
+				SettingsJson->TryGetNumberField(TEXT("clockPercent"), Settings.ClockPercent);
+				double SloopNumber = 0.0;
+				if (SettingsJson->TryGetNumberField(TEXT("somersloopCount"), SloopNumber) && IsFiniteInt32(SloopNumber))
+				{
+					Settings.SomersloopCount = FMath::Max(0, FMath::RoundToInt(SloopNumber));
+				}
+				SettingsJson->TryGetStringField(TEXT("fuelClassPath"), Settings.FuelClassPath);
+				if (FMath::IsFinite(Settings.ClockPercent) && Settings.ClockPercent > 0.0)
+				{
+					Plan->MachineSettings.Add(Pair.Key, MoveTemp(Settings));
 				}
 			}
 		}
@@ -1208,7 +1371,7 @@ bool FSFPPlannerPersistence::SaveSharedPlan(
 	OutError.Reset();
 	if (EditorId.IsEmpty())
 	{
-		OutError = TEXT("Die Spieleridentität für den Serverplan fehlt");
+		OutError = TEXT("Die Spieleridentität für den Multiplayer-Plan fehlt");
 		return false;
 	}
 	if (!ValidateSharedPlanPayload(Plan, OutError))
@@ -1237,7 +1400,7 @@ bool FSFPPlannerPersistence::SaveSharedPlan(
 			&Metadata);
 		if (!ExistingPlan.IsValid())
 		{
-			OutError = FString::Printf(TEXT("Vorhandener Serverplan ist nicht lesbar: %s"), *LoadError);
+			OutError = FString::Printf(TEXT("Vorhandener Multiplayer-Plan ist nicht lesbar: %s"), *LoadError);
 			return false;
 		}
 		if (Metadata.Revision <= 0)
@@ -1246,7 +1409,7 @@ bool FSFPPlannerPersistence::SaveSharedPlan(
 		}
 		if (ExpectedRevision <= 0 || ExpectedRevision != Metadata.Revision)
 		{
-			OutError = TEXT("Der Serverplan wurde inzwischen geändert; bitte neu laden und erneut versuchen");
+			OutError = TEXT("Der Multiplayer-Plan wurde inzwischen geändert; bitte neu laden und erneut versuchen");
 			return false;
 		}
 	}
@@ -1254,7 +1417,7 @@ bool FSFPPlannerPersistence::SaveSharedPlan(
 	{
 		if (ExpectedRevision != 0)
 		{
-			OutError = TEXT("Der Serverplan existiert nicht mehr; bitte die Serverliste aktualisieren");
+			OutError = TEXT("Der Multiplayer-Plan existiert nicht mehr; bitte die Serverliste aktualisieren");
 			return false;
 		}
 		TArray<FSFPSavedPlanInfo> ExistingPlans;
@@ -1297,7 +1460,7 @@ TSharedPtr<FSFPPlanResult> FSFPPlannerPersistence::LoadSharedPlan(
 	OutError.Reset();
 	if (!IsSafeNamedPlanFileName(FileName) || FileName.Len() > SFPMaxPlanNameLength + 16)
 	{
-		OutError = TEXT("Ungültiger Dateiname für den Serverplan");
+		OutError = TEXT("Ungültiger Dateiname für den Multiplayer-Plan");
 		return nullptr;
 	}
 	const FString Path = FPaths::Combine(GetSharedPlansDirectory(), FileName);
@@ -1312,7 +1475,7 @@ TSharedPtr<FSFPPlanResult> FSFPPlannerPersistence::LoadSharedPlan(
 	{
 		if (OutError.IsEmpty())
 		{
-			OutError = TEXT("Der Serverplan wurde nicht gefunden");
+			OutError = TEXT("Der Multiplayer-Plan wurde nicht gefunden");
 		}
 		return nullptr;
 	}
@@ -1339,7 +1502,7 @@ bool FSFPPlannerPersistence::DeleteSharedPlan(
 	OutError.Reset();
 	if (!IsSafeNamedPlanFileName(FileName) || FileName.Len() > SFPMaxPlanNameLength + 16)
 	{
-		OutError = TEXT("Ungültiger Dateiname für den Serverplan");
+		OutError = TEXT("Ungültiger Dateiname für den Multiplayer-Plan");
 		return false;
 	}
 	FSFPSavedPlanInfo Info;
@@ -1351,20 +1514,20 @@ bool FSFPPlannerPersistence::DeleteSharedPlan(
 	}
 	if (ExpectedRevision <= 0 || ExpectedRevision != Info.Revision)
 	{
-		OutError = TEXT("Der Serverplan wurde inzwischen geändert; bitte die Liste aktualisieren");
+		OutError = TEXT("Der Multiplayer-Plan wurde inzwischen geändert; bitte die Liste aktualisieren");
 		return false;
 	}
 	if (!Info.OwnerId.IsEmpty() && Info.OwnerId != RequesterId)
 	{
 		OutError = FString::Printf(
-			TEXT("Nur der Ersteller %s darf diesen Serverplan löschen"),
+			TEXT("Nur der Ersteller %s darf diesen Multiplayer-Plan löschen"),
 			Info.OwnerName.IsEmpty() ? TEXT("dieses Plans") : *Info.OwnerName);
 		return false;
 	}
 	const FString Path = FPaths::Combine(GetSharedPlansDirectory(), FileName);
 	if (!IFileManager::Get().Delete(*Path, false, true, true))
 	{
-		OutError = TEXT("Der Serverplan konnte auf dem Server nicht gelöscht werden");
+		OutError = TEXT("Der Multiplayer-Plan konnte auf dem Server nicht gelöscht werden");
 		return false;
 	}
 	return true;
@@ -1409,7 +1572,7 @@ bool FSFPPlannerPersistence::ListSharedPlans(TArray<FSFPSavedPlanInfo>& OutPlans
 	});
 	if (InvalidFiles > 0)
 	{
-		OutError = FString::Printf(TEXT("%d beschädigte Serverplan-Datei(en) wurden übersprungen"), InvalidFiles);
+		OutError = FString::Printf(TEXT("%d beschädigte Multiplayer-Plan-Datei(en) wurden übersprungen"), InvalidFiles);
 	}
 	return true;
 }

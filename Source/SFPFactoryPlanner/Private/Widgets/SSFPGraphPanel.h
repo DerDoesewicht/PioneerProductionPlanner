@@ -52,6 +52,7 @@ private:
 		FVector2D LabelPosition = FVector2D::ZeroVector;
 		FVector2D LabelSize = FVector2D::ZeroVector;
 		TArray<FVector2D> RoutePoints;
+		bool bFeedbackRoute = false;
 	};
 
 	void RebuildLayout();
@@ -70,6 +71,8 @@ private:
 	TMap<int32, FText> NodeRecipeTitles;
 	TMap<int32, FText> NodeMachineMeta;
 	TMap<int32, FText> NodeFooter;
+	TMap<int32, FText> NodeFooterSecondary;
+	TMap<int32, FText> NodeFooterTertiary;
 	TMap<int32, TArray<FPortDisplay>> InputPortsByNode;
 	TMap<int32, TArray<FPortDisplay>> OutputPortsByNode;
 	TSet<int32> RoutingNodeIds;
@@ -81,6 +84,7 @@ private:
 	float Zoom = 1.0f;
 	float RouteColumnSpacing = 1400.0f;
 	int32 MaxLayoutColumn = 0;
+	int32 FeedbackRouteCount = 0;
 	TMap<int32, FVector2D> ManualNodeOffsets;
 	int32 HoveredNodeId = INDEX_NONE;
 	int32 HoveredPortNodeId = INDEX_NONE;

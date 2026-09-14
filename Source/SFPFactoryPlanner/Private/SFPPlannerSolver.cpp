@@ -176,6 +176,113 @@ namespace
 		return nullptr;
 	}
 
+	/**
+	 * Resolve a base-game miner from the building descriptor contained in its
+	 * live construction recipe.  This deliberately derives the buildable path
+	 * from the descriptor path instead of guessing folder capitalization: on
+	 * Linux the shipped MinerMK1, MinerMk2 and MinerMk3 package names are
+	 * case-sensitive and not consistent with each other.
+	 */
+	UClass* RuntimeStandardMinerBuildableFromRecipe(
+		const TSubclassOf<UFGRecipe>& RecipeClass,
+		FString& OutDescriptorPath,
+		FString& OutDerivedBuildablePath)
+	{
+		OutDescriptorPath.Reset();
+		OutDerivedBuildablePath.Reset();
+		UClass* RawRecipeClass = RecipeClass.Get();
+		const UFGRecipe* RecipeCDO = IsValid(RawRecipeClass)
+			&& RawRecipeClass->IsChildOf(UFGRecipe::StaticClass())
+			? Cast<UFGRecipe>(RawRecipeClass->GetDefaultObject())
+			: nullptr;
+		if (!IsValid(RecipeCDO))
+		{
+			return nullptr;
+		}
+
+		for (const FItemAmount& Product : RecipeCDO->GetProducts())
+		{
+			UClass* DescriptorClass = Product.ItemClass.Get();
+			if (!IsValid(DescriptorClass))
+			{
+				continue;
+			}
+
+			const FString DescriptorPath = DescriptorClass->GetPathName();
+			FString DescriptorName = DescriptorClass->GetName();
+			if (!DescriptorPath.StartsWith(
+					TEXT("/Game/FactoryGame/Buildable/Factory/Miner"),
+					ESearchCase::IgnoreCase)
+				|| !DescriptorName.StartsWith(TEXT("Desc_Miner"), ESearchCase::IgnoreCase))
+			{
+				continue;
+			}
+			OutDescriptorPath = DescriptorPath;
+
+			// Prefer the descriptor's authoritative class reference when it is
+			// already resolved by the runtime recipe catalog.
+			if (DescriptorClass->IsChildOf(UFGBuildingDescriptor::StaticClass()))
+			{
+				UClass* MappedClass = UFGBuildingDescriptor::GetBuildableClass(
+					TSubclassOf<UFGBuildingDescriptor>(DescriptorClass)).Get();
+				if (IsValid(MappedClass)
+					&& MappedClass->IsChildOf(AFGBuildableResourceExtractor::StaticClass()))
+				{
+					OutDerivedBuildablePath = MappedClass->GetPathName();
+					return MappedClass;
+				}
+			}
+
+			// The descriptor is present in the live recipe even when its buildable
+			// soft reference has not been loaded yet. Preserve the exact package
+			// directory and derive only the conventional asset/object name.
+			DescriptorName.RemoveFromEnd(TEXT("_C"), ESearchCase::IgnoreCase);
+			if (!DescriptorName.StartsWith(TEXT("Desc_"), ESearchCase::IgnoreCase))
+			{
+				continue;
+			}
+			const FString MinerName = DescriptorName.Mid(5);
+			const FString DescriptorPackage = DescriptorClass->GetOutermost()->GetName();
+			int32 LastSlash = INDEX_NONE;
+			if (!DescriptorPackage.FindLastChar(TEXT('/'), LastSlash) || LastSlash <= 0)
+			{
+				continue;
+			}
+			const FString BuildableObject = TEXT("Build_") + MinerName;
+			OutDerivedBuildablePath = DescriptorPackage.Left(LastSlash + 1)
+				+ BuildableObject + TEXT(".") + BuildableObject + TEXT("_C");
+			if (UClass* LoadedClass = LoadClass<AFGBuildableResourceExtractor>(
+				nullptr, *OutDerivedBuildablePath))
+			{
+				return LoadedClass;
+			}
+		}
+		return nullptr;
+	}
+
+	int32 VanillaStandardMinerTier(const FString& ClassPath)
+	{
+		if (ClassPath.Equals(
+			TEXT("/Game/FactoryGame/Buildable/Factory/MinerMK1/Build_MinerMk1.Build_MinerMk1_C"),
+			ESearchCase::CaseSensitive))
+		{
+			return 1;
+		}
+		if (ClassPath.Equals(
+			TEXT("/Game/FactoryGame/Buildable/Factory/MinerMk2/Build_MinerMk2.Build_MinerMk2_C"),
+			ESearchCase::CaseSensitive))
+		{
+			return 2;
+		}
+		if (ClassPath.Equals(
+			TEXT("/Game/FactoryGame/Buildable/Factory/MinerMk3/Build_MinerMk3.Build_MinerMk3_C"),
+			ESearchCase::CaseSensitive))
+		{
+			return 3;
+		}
+		return 0;
+	}
+
 	UClass* SafeBuildingDescriptorClassFromRecipe(const TSubclassOf<UFGRecipe>& RecipeClass)
 	{
 		UClass* RawRecipeClass = RecipeClass.Get();
@@ -338,6 +445,42 @@ namespace
 			: static_cast<double>(Property->GetSignedIntPropertyValue(ValuePtr));
 	}
 
+	double FirstPositiveReflectedNumber(
+		const void* Container,
+		UStruct* OwnerType,
+		const TArray<FName>& PropertyNames,
+		const double FallbackValue)
+	{
+		for (const FName PropertyName : PropertyNames)
+		{
+			const double Value = ReflectedNumberValue(Container, OwnerType, PropertyName, -1.0);
+			if (FMath::IsFinite(Value) && Value > KINDA_SMALL_NUMBER)
+			{
+				return Value;
+			}
+		}
+		return FallbackValue;
+	}
+
+	double NormalizeFraction(const double Value, const double FallbackValue)
+	{
+		if (!FMath::IsFinite(Value) || Value <= KINDA_SMALL_NUMBER)
+		{
+			return FallbackValue;
+		}
+		// Content may expose a boost as a fraction (0.10), an absolute multiplier
+		// (1.10), or a percentage (10). Convert all three to a +fraction.
+		if (Value < 1.0 - KINDA_SMALL_NUMBER)
+		{
+			return Value;
+		}
+		if (Value <= 2.0 + KINDA_SMALL_NUMBER)
+		{
+			return FMath::Max(0.0, Value - 1.0);
+		}
+		return Value / 100.0;
+	}
+
 
 	bool ApplyVariableRecipePower(FSFPPlannerRecipe& Recipe)
 	{
@@ -392,6 +535,195 @@ namespace
 		}
 		const FBoolProperty* Property = CastField<FBoolProperty>(OwnerType->FindPropertyByName(PropertyName));
 		return Property != nullptr ? Property->GetPropertyValue_InContainer(Container) : bDefaultValue;
+	}
+
+	bool IsOptionalBurnerManufacturerClass(const UClass* MachineClass)
+	{
+		for (const UClass* Current = MachineClass; IsValid(Current); Current = Current->GetSuperClass())
+		{
+			if (Current->GetName().Equals(TEXT("KhaosBuildableManufacturerBurner"), ESearchCase::CaseSensitive)
+				|| Current->GetPathName().Equals(TEXT("/Script/BurnerManufacturer.KhaosBuildableManufacturerBurner"), ESearchCase::CaseSensitive))
+			{
+				return true;
+			}
+		}
+		return false;
+	}
+
+	bool ReadOptionalBurnerFuelClasses(UObject* MachineCDO, TArray<TSoftClassPtr<UFGItemDescriptor>>& OutFuelClasses)
+	{
+		OutFuelClasses.Reset();
+		if (!IsValid(MachineCDO))
+		{
+			return false;
+		}
+
+		UFunction* Getter = MachineCDO->FindFunction(TEXT("GetDefaultFuelClasses"));
+		if (!IsValid(Getter))
+		{
+			return false;
+		}
+
+		struct FGetDefaultFuelClassesParams
+		{
+			TArray<TSoftClassPtr<UFGItemDescriptor>> ReturnValue;
+		};
+
+		FGetDefaultFuelClassesParams Params;
+		MachineCDO->ProcessEvent(Getter, &Params);
+		OutFuelClasses = MoveTemp(Params.ReturnValue);
+		return !OutFuelClasses.IsEmpty();
+	}
+
+	int32 KnownVanillaSomersloopSlots(const UClass* MachineClass)
+	{
+		if (!IsValid(MachineClass))
+		{
+			return INDEX_NONE;
+		}
+
+		// Resource extractors (miners, water/oil extractors, resource-well extractors)
+		// are intentionally not production-amplifiable in vanilla.
+		if (MachineClass->IsChildOf(AFGBuildableResourceExtractor::StaticClass()))
+		{
+			return 0;
+		}
+
+		const FString ClassName = MachineClass->GetName();
+		// Fallbacks are only used when the loaded class does not expose a usable
+		// runtime max-production-boost. Runtime values always win so modded/S+
+		// machine classes can configure their own limits.
+		if (ClassName.Equals(TEXT("Build_SmelterMk1_C"), ESearchCase::CaseSensitive)
+			|| ClassName.Equals(TEXT("Build_ConstructorMk1_C"), ESearchCase::CaseSensitive))
+		{
+			return 1;
+		}
+		if (ClassName.Equals(TEXT("Build_AssemblerMk1_C"), ESearchCase::CaseSensitive)
+			|| ClassName.Equals(TEXT("Build_FoundryMk1_C"), ESearchCase::CaseSensitive)
+			|| ClassName.Equals(TEXT("Build_OilRefinery_C"), ESearchCase::CaseSensitive)
+			|| ClassName.Equals(TEXT("Build_Converter_C"), ESearchCase::CaseSensitive))
+		{
+			return 2;
+		}
+		if (ClassName.Equals(TEXT("Build_ManufacturerMk1_C"), ESearchCase::CaseSensitive)
+			|| ClassName.Equals(TEXT("Build_Blender_C"), ESearchCase::CaseSensitive)
+			|| ClassName.Equals(TEXT("Build_HadronCollider_C"), ESearchCase::CaseSensitive)
+			|| ClassName.Equals(TEXT("Build_QuantumEncoder_C"), ESearchCase::CaseSensitive))
+		{
+			return 4;
+		}
+		if (ClassName.Equals(TEXT("Build_Packager_C"), ESearchCase::CaseSensitive))
+		{
+			return 0;
+		}
+		return INDEX_NONE;
+	}
+
+	FSFPMachineRuntimeConfig ReadMachineRuntimeConfig(const UObject* MachineCDO, UClass* MachineClass)
+	{
+		FSFPMachineRuntimeConfig Config;
+		if (!IsValid(MachineCDO) || !IsValid(MachineClass))
+		{
+			return Config;
+		}
+
+		Config.bCanChangePotential = ReflectedBoolValue(MachineCDO, MachineClass, TEXT("mCanChangePotential"), false);
+		Config.MinPotential = FMath::Max(0.001, ReflectedNumberValue(MachineCDO, MachineClass, TEXT("mMinPotential"), 1.0));
+		const double ReflectedMaxPotential = FMath::Max(
+			ReflectedNumberValue(MachineCDO, MachineClass, TEXT("mMaxPotential"), 1.0),
+			ReflectedNumberValue(MachineCDO, MachineClass, TEXT("mMaxDefaultPotential"), 1.0));
+		Config.bRuntimeMaxPotentialKnown = FMath::IsFinite(ReflectedMaxPotential) && ReflectedMaxPotential > 1.0 + KINDA_SMALL_NUMBER;
+		Config.MaxPotential = Config.bRuntimeMaxPotentialKnown ? ReflectedMaxPotential : 1.0;
+
+		Config.BaseProductionBoost = FMath::Max(0.001, ReflectedNumberValue(
+			MachineCDO, MachineClass, TEXT("mBaseProductionBoost"), 1.0));
+		Config.ProductionBoostPerSloop = FMath::Max(0.0, ReflectedNumberValue(
+			MachineCDO, MachineClass, TEXT("mProductionShardBoostMultiplier"), 0.0));
+		Config.ProductionBoostPowerExponent = FMath::Max(0.001, ReflectedNumberValue(
+			MachineCDO, MachineClass, TEXT("mProductionBoostPowerConsumptionExponent"), 1.0));
+		Config.bCanChangeProductionBoost = ReflectedBoolValue(
+			MachineCDO, MachineClass, TEXT("mCanChangeProductionBoost"), false)
+			|| Config.ProductionBoostPerSloop > KINDA_SMALL_NUMBER;
+
+		const double ReflectedMaxBoost = FMath::Max(
+			ReflectedNumberValue(MachineCDO, MachineClass, TEXT("mMaxProductionBoost"), Config.BaseProductionBoost),
+			ReflectedNumberValue(MachineCDO, MachineClass, TEXT("mMaxDefaultProductionBoost"), Config.BaseProductionBoost));
+		Config.bRuntimeMaxProductionBoostKnown = FMath::IsFinite(ReflectedMaxBoost)
+			&& ReflectedMaxBoost > Config.BaseProductionBoost + KINDA_SMALL_NUMBER;
+		Config.MaxProductionBoost = Config.bRuntimeMaxProductionBoostKnown
+			? ReflectedMaxBoost
+			: Config.BaseProductionBoost;
+		if (Config.bRuntimeMaxProductionBoostKnown && Config.ProductionBoostPerSloop > KINDA_SMALL_NUMBER)
+		{
+			Config.MaxSomersloops = FMath::Max(0, FMath::RoundToInt(
+				(Config.MaxProductionBoost - Config.BaseProductionBoost) / Config.ProductionBoostPerSloop));
+		}
+
+		const int32 VanillaSlotFallback = KnownVanillaSomersloopSlots(MachineClass);
+		if (VanillaSlotFallback == 0)
+		{
+			// Explicitly non-amplifiable vanilla building (e.g. miners / Packager).
+			Config.bCanChangeProductionBoost = false;
+			Config.bRuntimeMaxProductionBoostKnown = true;
+			Config.MaxSomersloops = 0;
+			Config.MaxProductionBoost = Config.BaseProductionBoost;
+		}
+		else if (VanillaSlotFallback > 0 && !Config.bRuntimeMaxProductionBoostKnown)
+		{
+			// Some CDOs expose the production-amplification capability but not a
+			// meaningful max boost. Use the documented vanilla slot count only as
+			// a fallback; modded/S+ runtime values remain authoritative.
+			if (Config.ProductionBoostPerSloop <= KINDA_SMALL_NUMBER)
+			{
+				Config.ProductionBoostPerSloop = 1.0 / static_cast<double>(VanillaSlotFallback);
+			}
+			Config.bCanChangeProductionBoost = true;
+			Config.bRuntimeMaxProductionBoostKnown = true;
+			Config.MaxSomersloops = VanillaSlotFallback;
+			Config.MaxProductionBoost = Config.BaseProductionBoost
+				+ static_cast<double>(VanillaSlotFallback) * Config.ProductionBoostPerSloop;
+		}
+		return Config;
+	}
+
+	void ApplyGeneratorClockRuntimeConfig(
+		FSFPPowerGeneratorOption& Generator,
+		const UObject* GeneratorCDO,
+		UClass* GeneratorClass)
+	{
+		if (!IsValid(GeneratorCDO) || !IsValid(GeneratorClass))
+		{
+			return;
+		}
+
+		Generator.bCanChangePotential = ReflectedBoolValue(
+			GeneratorCDO, GeneratorClass, TEXT("mCanChangePotential"), false);
+		Generator.MinPotential = FMath::Max(0.01, ReflectedNumberValue(
+			GeneratorCDO, GeneratorClass, TEXT("mMinPotential"), 0.01));
+		const double ReflectedMaxPotential = FMath::Max(
+			ReflectedNumberValue(GeneratorCDO, GeneratorClass, TEXT("mMaxPotential"), 1.0),
+			ReflectedNumberValue(GeneratorCDO, GeneratorClass, TEXT("mMaxDefaultPotential"), 1.0));
+		Generator.bRuntimeMaxPotentialKnown = FMath::IsFinite(ReflectedMaxPotential)
+			&& ReflectedMaxPotential > 1.0 + KINDA_SMALL_NUMBER;
+		Generator.MaxPotential = Generator.bRuntimeMaxPotentialKnown
+			? ReflectedMaxPotential
+			: (Generator.bCanChangePotential ? 2.5 : 1.0);
+	}
+
+	double GeneratorMinClockPercent(const FSFPPowerGeneratorOption& Generator)
+	{
+		return Generator.bCanChangePotential
+			? FMath::Max(1.0, Generator.MinPotential * 100.0)
+			: 100.0;
+	}
+
+	double GeneratorMaxClockPercent(const FSFPPowerGeneratorOption& Generator)
+	{
+		if (!Generator.bCanChangePotential)
+		{
+			return 100.0;
+		}
+		return FMath::Max(100.0, Generator.MaxPotential * 100.0);
 	}
 
 	double ModularHeaterByproductRatePerMinute(
@@ -515,6 +847,7 @@ struct FSFPPlannerSolver::FSolveContext
 	TMap<FString, int32> ByproductNodeByKey;
 	TMap<FString, int32> DirectResourceNodeByKey;
 	TMap<FString, FString> RecipeOverrides;
+	TMap<FString, FSFPMachinePlanSettings> MachineSettings;
 	int32 ExpansionCount = 0;
 	bool bOnlyAvailableRecipes = false;
 };
@@ -602,6 +935,7 @@ bool FSFPPlannerSolver::Initialize(UWorld* World, FString& OutError)
 	MergerDisplayName.Reset();
 	PipeJunctionClassPath.Reset();
 	PipeJunctionDisplayName.Reset();
+	MinerDiagnostics.Reset();
 
 	if (!IsValid(World))
 	{
@@ -741,6 +1075,34 @@ bool FSFPPlannerSolver::Initialize(UWorld* World, FString& OutError)
 		Recipe.MachineClass = MachineClass;
 		Recipe.MachineName = SolverBuildableDisplayName(MachineCDO, MachineClass);
 		Recipe.BasePowerMW = MachineCDO->GetDefaultProducingPowerConsumption();
+		Recipe.PowerExponent = FMath::Max(0.001, ReflectedNumberValue(
+			MachineCDO, MachineClass, TEXT("mPowerConsumptionExponent"), 1.0));
+		Recipe.MachineConfig = ReadMachineRuntimeConfig(MachineCDO, MachineClass);
+		Recipe.bFuelPowered = IsOptionalBurnerManufacturerClass(MachineClass);
+		if (Recipe.bFuelPowered)
+		{
+			TArray<TSoftClassPtr<UFGItemDescriptor>> BurnerFuelClasses;
+			if (ReadOptionalBurnerFuelClasses(const_cast<AFGBuildableFactory*>(MachineCDO), BurnerFuelClasses))
+			{
+				for (const TSoftClassPtr<UFGItemDescriptor>& SoftFuelClass : BurnerFuelClasses)
+				{
+					UClass* FuelClass = SoftFuelClass.LoadSynchronous();
+					if (!IsValid(FuelClass) || !FuelClass->IsChildOf(UFGItemDescriptor::StaticClass())) continue;
+					FSFPPlannerFuelOption Fuel;
+					Fuel.ItemClass = TSubclassOf<UFGItemDescriptor>(FuelClass);
+					Fuel.ClassPath = FuelClass->GetPathName();
+					Fuel.DisplayName = ItemDisplayName(FuelClass);
+					Fuel.Form = SolverResourceFormToString(UFGItemDescriptor::GetForm(Fuel.ItemClass));
+					Fuel.SourceMount = SolverSourceMountFromPath(Fuel.ClassPath);
+					Fuel.EnergyValueMJ = FMath::Max(0.0, static_cast<double>(UFGItemDescriptor::GetEnergyValue(Fuel.ItemClass)));
+					if (Fuel.EnergyValueMJ > KINDA_SMALL_NUMBER) Recipe.FuelOptions.Add(MoveTemp(Fuel));
+				}
+			}
+			Recipe.FuelOptions.Sort([](const FSFPPlannerFuelOption& A, const FSFPPlannerFuelOption& B)
+			{
+				return A.ClassPath < B.ClassPath;
+			});
+		}
 		if (!ApplyVariableRecipePower(Recipe)) continue;
 
 		const double DurationMinutes = Recipe.DurationSeconds / 60.0;
@@ -872,6 +1234,35 @@ bool FSFPPlannerSolver::Initialize(UWorld* World, FString& OutError)
 			Variant.MachineClass = MachineClass;
 			Variant.MachineName = SolverBuildableDisplayName(MachineCDO, MachineClass);
 			Variant.BasePowerMW = Power;
+			Variant.PowerExponent = FMath::Max(0.001, ReflectedNumberValue(
+				MachineCDO, MachineClass, TEXT("mPowerConsumptionExponent"), 1.0));
+			Variant.MachineConfig = ReadMachineRuntimeConfig(MachineCDO, MachineClass);
+			Variant.bFuelPowered = IsOptionalBurnerManufacturerClass(MachineClass);
+			Variant.FuelOptions.Reset();
+			if (Variant.bFuelPowered)
+			{
+				TArray<TSoftClassPtr<UFGItemDescriptor>> BurnerFuelClasses;
+				if (ReadOptionalBurnerFuelClasses(const_cast<AFGBuildableFactory*>(MachineCDO), BurnerFuelClasses))
+				{
+					for (const TSoftClassPtr<UFGItemDescriptor>& SoftFuelClass : BurnerFuelClasses)
+					{
+						UClass* FuelClass = SoftFuelClass.LoadSynchronous();
+						if (!IsValid(FuelClass) || !FuelClass->IsChildOf(UFGItemDescriptor::StaticClass())) continue;
+						FSFPPlannerFuelOption Fuel;
+						Fuel.ItemClass = TSubclassOf<UFGItemDescriptor>(FuelClass);
+						Fuel.ClassPath = FuelClass->GetPathName();
+						Fuel.DisplayName = ItemDisplayName(FuelClass);
+						Fuel.Form = SolverResourceFormToString(UFGItemDescriptor::GetForm(Fuel.ItemClass));
+						Fuel.SourceMount = SolverSourceMountFromPath(Fuel.ClassPath);
+						Fuel.EnergyValueMJ = FMath::Max(0.0, static_cast<double>(UFGItemDescriptor::GetEnergyValue(Fuel.ItemClass)));
+						if (Fuel.EnergyValueMJ > KINDA_SMALL_NUMBER) Variant.FuelOptions.Add(MoveTemp(Fuel));
+					}
+				}
+				Variant.FuelOptions.Sort([](const FSFPPlannerFuelOption& A, const FSFPPlannerFuelOption& B)
+				{
+					return A.ClassPath < B.ClassPath;
+				});
+			}
 			Variant.bAvailable = RecipeManager->IsRecipeAvailable(BaseRecipe.RecipeClass)
 				&& BuildableAvailability.FindRef(MachineClass);
 			Variant.DurationSeconds = BaseRecipe.DurationSeconds / Speed;
@@ -894,9 +1285,11 @@ bool FSFPPlannerSolver::Initialize(UWorld* World, FString& OutError)
 		}
 	}
 
+	// Build modular raw routes first. Standard-miner registration can then avoid
+	// mixing Miner Mk.1-3 into a resource selector owned by the modular system.
+	BuildOptionalModularMinerCatalog(AllRecipes, RecipeManager, ProductsByClass);
 	BuildStandardMinerCatalog(AllRecipes, RecipeManager, ProductsByClass);
 	BuildFluidExtractorCatalog(AllRecipes, RecipeManager, ProductsByClass);
-	BuildOptionalModularMinerCatalog(AllRecipes, RecipeManager, ProductsByClass);
 
 	ProductsByClass.GenerateValueArray(Products);
 	Products.Sort([](const TSharedPtr<FSFPProductOption>& Left, const TSharedPtr<FSFPProductOption>& Right)
@@ -909,6 +1302,7 @@ bool FSFPPlannerSolver::Initialize(UWorld* World, FString& OutError)
 	BuildTransportCatalog(AllRecipes, RecipeManager);
 	BuildConstructionCostCatalog(AllRecipes);
 	BuildPowerGeneratorCatalog(AllRecipes, RecipeManager);
+	BuildAlienPowerAugmenterCatalog(AllRecipes, RecipeManager);
 	if (Products.IsEmpty())
 	{
 		OutError = TEXT("Keine maschinenproduzierten Gegenstände gefunden");
@@ -951,6 +1345,7 @@ void FSFPPlannerSolver::BuildPowerGeneratorCatalog(
 			Generator->PowerProductionMW = FMath::Max(
 				0.0,
 				static_cast<double>(GeneratorCDO->GetDefaultPowerProductionCapacity()));
+			ApplyGeneratorClockRuntimeConfig(*Generator, GeneratorCDO, GeneratorClass);
 
 			if (GeneratorCDO->GetRequiresSupplementalResource())
 			{
@@ -1083,6 +1478,93 @@ void FSFPPlannerSolver::BuildPowerGeneratorCatalog(
 		const int32 NameOrder = Left->DisplayName.Compare(Right->DisplayName, ESearchCase::IgnoreCase);
 		return NameOrder == 0 ? Left->ClassPath < Right->ClassPath : NameOrder < 0;
 	});
+}
+
+void FSFPPlannerSolver::BuildAlienPowerAugmenterCatalog(
+	const TArray<TSubclassOf<UFGRecipe>>& AllRecipes,
+	AFGRecipeManager* RecipeManager)
+{
+	AlienPowerAugmenter = FSFPAlienPowerAugmenterOption();
+	UClass* MatrixClass = nullptr;
+
+	for (const TSubclassOf<UFGRecipe>& RecipeClass : AllRecipes)
+	{
+		UClass* RawRecipeClass = RecipeClass.Get();
+		const UFGRecipe* RecipeCDO = IsValid(RawRecipeClass)
+			? Cast<UFGRecipe>(RawRecipeClass->GetDefaultObject()) : nullptr;
+		if (!IsValid(RecipeCDO))
+		{
+			continue;
+		}
+
+		for (const FItemAmount& Product : RecipeCDO->GetProducts())
+		{
+			UClass* ProductClass = Product.ItemClass.Get();
+			if (IsValid(ProductClass)
+				&& ProductClass->IsChildOf(UFGItemDescriptor::StaticClass())
+				&& (ProductClass->GetName().Equals(TEXT("Desc_AlienPowerFuel_C"), ESearchCase::CaseSensitive)
+					|| ProductClass->GetPathName().Contains(TEXT("/AlienPowerFuel/Desc_AlienPowerFuel"), ESearchCase::IgnoreCase)))
+			{
+				MatrixClass = ProductClass;
+			}
+		}
+
+		UClass* DescriptorClass = SafeBuildingDescriptorClassFromRecipe(RecipeClass);
+		UClass* BuildableClass = SafeBuildableClassFromRecipe(RecipeClass);
+		if (!IsValid(DescriptorClass) || !IsValid(BuildableClass))
+		{
+			continue;
+		}
+		const FString DescriptorPath = DescriptorClass->GetPathName();
+		const FString BuildablePath = BuildableClass->GetPathName();
+		const bool bAlienAugmenter = DescriptorPath.Contains(TEXT("AlienPowerBuilding"), ESearchCase::IgnoreCase)
+			|| BuildablePath.Contains(TEXT("AlienPower"), ESearchCase::IgnoreCase);
+		if (!bAlienAugmenter)
+		{
+			continue;
+		}
+
+		const AFGBuildable* BuildableCDO = Cast<AFGBuildable>(BuildableClass->GetDefaultObject());
+		AlienPowerAugmenter.BuildableClass = BuildableClass;
+		AlienPowerAugmenter.ClassPath = BuildablePath;
+		AlienPowerAugmenter.DisplayName = SolverBuildableDisplayName(BuildableCDO, BuildableClass);
+		AlienPowerAugmenter.bAvailable |= IsValid(RecipeManager)
+			&& RecipeManager->IsRecipeAvailable(RecipeClass);
+
+		const UObject* CDO = BuildableClass->GetDefaultObject();
+		// Prefer runtime/CDO values when the game or another mod exposes them.
+		// Exact vanilla values are only fallbacks for the exact Alien Power Augmenter.
+		AlienPowerAugmenter.BasePowerPerAugmenterMW = FirstPositiveReflectedNumber(
+			CDO, BuildableClass,
+			{TEXT("mBasePowerProduction"), TEXT("mPowerProduction"), TEXT("mPowerProductionCapacity"), TEXT("mBasePowerProductionCapacity")},
+			500.0);
+		AlienPowerAugmenter.PassiveBoostPerAugmenter = NormalizeFraction(
+			FirstPositiveReflectedNumber(CDO, BuildableClass,
+				{TEXT("mPowerMultiplier"), TEXT("mPowerBoost"), TEXT("mPassivePowerBoost"), TEXT("mGridBoost")}, 0.10),
+			0.10);
+		AlienPowerAugmenter.FueledBoostPerAugmenter = NormalizeFraction(
+			FirstPositiveReflectedNumber(CDO, BuildableClass,
+				{TEXT("mFuelPowerMultiplier"), TEXT("mFueledPowerBoost"), TEXT("mBoostedPowerMultiplier"), TEXT("mGridBoostWithFuel")}, 0.30),
+			0.30);
+		AlienPowerAugmenter.MatrixRatePerMinute = FirstPositiveReflectedNumber(
+			CDO, BuildableClass,
+			{TEXT("mFuelConsumptionRate"), TEXT("mFuelConsumptionPerMinute"), TEXT("mAlienPowerFuelConsumptionRate"), TEXT("mMatrixConsumptionRate")},
+			5.0);
+		if (AlienPowerAugmenter.MatrixRatePerMinute < 1.0)
+		{
+			// Runtime factory rates are often stored per second.
+			AlienPowerAugmenter.MatrixRatePerMinute *= 60.0;
+		}
+	}
+
+	if (IsValid(MatrixClass))
+	{
+		AlienPowerAugmenter.MatrixItemClass = TSubclassOf<UFGItemDescriptor>(MatrixClass);
+		AlienPowerAugmenter.MatrixItemClassPath = MatrixClass->GetPathName();
+		AlienPowerAugmenter.MatrixDisplayName = ItemDisplayName(MatrixClass);
+		AlienPowerAugmenter.MatrixForm = SolverResourceFormToString(
+			UFGItemDescriptor::GetForm(AlienPowerAugmenter.MatrixItemClass));
+	}
 }
 
 void FSFPPlannerSolver::BuildOptionalPowerGeneratorCatalog(
@@ -1265,6 +1747,7 @@ void FSFPPlannerSolver::BuildOptionalPowerGeneratorCatalog(
 		Generator->SourceMount = SolverSourceMountFromPath(Info.ClassPath);
 		Generator->bAvailable = Info.bAvailable;
 		Generator->PowerProductionMW = PowerMW;
+		ApplyGeneratorClockRuntimeConfig(*Generator, BuildableCDO, Info.BuildableClass);
 		Generator->bVariableOutput = Info.SearchText.Contains(TEXT("solar"))
 			|| Info.SearchText.Contains(TEXT("wind"))
 			|| Info.SearchText.Contains(TEXT("water"))
@@ -1619,6 +2102,7 @@ void FSFPPlannerSolver::BuildOptionalPowerGeneratorCatalog(
 			TEXT("%s + %s"), *GeneratorInfo->DisplayName, *BestTurbine->DisplayName);
 		Generator->SourceMount = SolverSourceMountFromPath(GeneratorInfo->ClassPath);
 		Generator->PowerProductionMW = PowerMW;
+		ApplyGeneratorClockRuntimeConfig(*Generator, GeneratorCDO, GeneratorInfo->BuildableClass);
 		Generator->bModularPower = true;
 		Generator->TurbineClass = BestTurbine->BuildableClass;
 		Generator->TurbineClassPath = BestTurbine->ClassPath;
@@ -1968,19 +2452,149 @@ void FSFPPlannerSolver::BuildStandardMinerCatalog(
 		TEXT("/Game/FactoryGame/Resource/RawResources/SAM/Desc_SAM.Desc_SAM_C"),
 	};
 	TMap<UClass*, FOptionalBuildableInfo> Miners;
-	for (const TSubclassOf<UFGRecipe>& ConstructionRecipe : AllRecipes)
+	auto RegisterStandardMiner = [&Miners](UClass* Class, const bool bAvailable)
 	{
-		UClass* Class = SafeBuildableClassFromRecipe(ConstructionRecipe);
-		if (!IsClassOrParentNamed(Class, TEXT("FGBuildableResourceExtractor"))
-			|| IsClassOrParentNamed(Class, TEXT("KLMMBuildableMiner"))) { continue; }
+		if (!IsValid(Class)
+			|| !Class->IsChildOf(AFGBuildableResourceExtractor::StaticClass())
+			|| IsClassOrParentNamed(Class, TEXT("KLMMBuildableMiner")))
+		{
+			return;
+		}
 		const auto* CDO = Cast<AFGBuildableResourceExtractor>(Class->GetDefaultObject());
-		if (!IsValid(CDO)) { continue; }
+		if (!IsValid(CDO))
+		{
+			return;
+		}
 		FOptionalBuildableInfo& Info = Miners.FindOrAdd(Class);
 		Info.BuildableClass = Class;
 		Info.ClassPath = Class->GetPathName();
 		Info.DisplayName = SolverBuildableDisplayName(CDO, Class);
 		Info.PowerMW = OptionalBuildablePower(Class);
-		Info.bAvailable |= IsValid(RecipeManager) && RecipeManager->IsRecipeAvailable(ConstructionRecipe);
+		Info.bAvailable |= bAvailable;
+	};
+
+	// Prefer the actual construction catalog so unlock state remains authoritative.
+	// Standard miners are resolved a second way from the descriptors in the live
+	// recipes. This is required on Linux where the shipped MinerMK1/MinerMk2/MinerMk3
+	// package capitalization differs and a guessed canonical path can silently miss.
+	for (const TSubclassOf<UFGRecipe>& ConstructionRecipe : AllRecipes)
+	{
+		const bool bAvailable = IsValid(RecipeManager)
+			&& RecipeManager->IsRecipeAvailable(ConstructionRecipe);
+		UClass* BuildableClass = SafeBuildableClassFromRecipe(ConstructionRecipe);
+		FString DescriptorPath;
+		FString DerivedBuildablePath;
+		if (!IsValid(BuildableClass)
+			|| !BuildableClass->IsChildOf(AFGBuildableResourceExtractor::StaticClass()))
+		{
+			BuildableClass = RuntimeStandardMinerBuildableFromRecipe(
+				ConstructionRecipe, DescriptorPath, DerivedBuildablePath);
+		}
+		RegisterStandardMiner(BuildableClass, bAvailable);
+		if (bMinerDiagnostics && !DescriptorPath.IsEmpty())
+		{
+			const FString RecipePath = IsValid(ConstructionRecipe.Get())
+				? ConstructionRecipe->GetPathName() : TEXT("<invalid>");
+			const FString ResolvedBuildablePath = IsValid(BuildableClass)
+				? BuildableClass->GetPathName() : TEXT("<missing>");
+			MinerDiagnostics.Add(FString::Printf(
+				TEXT("STANDARD_RUNTIME recipe=%s descriptor=%s derived=%s resolved=%s available=%d"),
+				*RecipePath,
+				*DescriptorPath,
+				*DerivedBuildablePath,
+				*ResolvedBuildablePath,
+				bAvailable ? 1 : 0));
+		}
+	}
+
+	// Some runtime recipe catalogs omit the original vanilla build recipe entirely.
+	// Resolve the three canonical miner descriptors as a discovery fallback. This
+	// does not mark a locked miner available: availability still comes from any
+	// construction recipe above that resolves to the same buildable class.
+	struct FVanillaMinerFallback
+	{
+		const TCHAR* BuildablePath;
+		const TCHAR* DescriptorPath;
+		const TCHAR* BuildRecipePath;
+		bool bBasicTierAlwaysAvailable;
+	};
+	static const FVanillaMinerFallback VanillaMinerFallbacks[] = {
+		{
+			TEXT("/Game/FactoryGame/Buildable/Factory/MinerMK1/Build_MinerMk1.Build_MinerMk1_C"),
+			TEXT("/Game/FactoryGame/Buildable/Factory/MinerMK1/Desc_MinerMk1.Desc_MinerMk1_C"),
+			TEXT("/Game/FactoryGame/Recipes/Buildings/Recipe_MinerMk1.Recipe_MinerMk1_C"),
+			true
+		},
+		{
+			TEXT("/Game/FactoryGame/Buildable/Factory/MinerMk2/Build_MinerMk2.Build_MinerMk2_C"),
+			TEXT("/Game/FactoryGame/Buildable/Factory/MinerMk2/Desc_MinerMk2.Desc_MinerMk2_C"),
+			TEXT("/Game/FactoryGame/Recipes/Buildings/Recipe_MinerMk2.Recipe_MinerMk2_C"),
+			false
+		},
+		{
+			TEXT("/Game/FactoryGame/Buildable/Factory/MinerMk3/Build_MinerMk3.Build_MinerMk3_C"),
+			TEXT("/Game/FactoryGame/Buildable/Factory/MinerMk3/Desc_MinerMk3.Desc_MinerMk3_C"),
+			TEXT("/Game/FactoryGame/Recipes/Buildings/Recipe_MinerMk3.Recipe_MinerMk3_C"),
+			false
+		},
+	};
+	for (const FVanillaMinerFallback& Fallback : VanillaMinerFallbacks)
+	{
+		// Load the actual buildable first. The runtime export proves these exact
+		// vanilla assets exist even in catalogs where the planner's generic machine
+		// discovery reports zero miners. Descriptor resolution remains a fallback.
+		UClass* BuildableClass = LoadClass<AFGBuildableResourceExtractor>(
+			nullptr, Fallback.BuildablePath);
+		if (!IsValid(BuildableClass) || !BuildableClass->IsChildOf(AFGBuildableResourceExtractor::StaticClass()))
+		{
+			UClass* DescriptorClass = LoadObject<UClass>(nullptr, Fallback.DescriptorPath);
+			if (IsValid(DescriptorClass) && DescriptorClass->IsChildOf(UFGBuildingDescriptor::StaticClass()))
+			{
+				BuildableClass = UFGBuildingDescriptor::GetBuildableClass(
+					TSubclassOf<UFGBuildingDescriptor>(DescriptorClass)).Get();
+			}
+		}
+		if (!IsValid(BuildableClass) || !BuildableClass->IsChildOf(AFGBuildableResourceExtractor::StaticClass()))
+		{
+			UE_LOG(LogSFPFactoryPlanner, Warning,
+				TEXT("Standard miner fallback could not resolve buildable: %s"),
+				Fallback.BuildablePath);
+			continue;
+		}
+
+		bool bBuildRecipeResolved = false;
+		bool bBuildRecipeAvailable = false;
+		if (UClass* BuildRecipeClass = LoadObject<UClass>(nullptr, Fallback.BuildRecipePath);
+			IsValid(BuildRecipeClass) && BuildRecipeClass->IsChildOf(UFGRecipe::StaticClass()))
+		{
+			bBuildRecipeResolved = true;
+			if (IsValid(RecipeManager))
+			{
+				bBuildRecipeAvailable = RecipeManager->IsRecipeAvailable(
+					TSubclassOf<UFGRecipe>(BuildRecipeClass));
+			}
+		}
+
+		// Mk.1 is the base-game extraction fallback and must remain usable even if
+		// a modded recipe manager omits construction-recipe unlock state. Higher
+		// tiers still honor their real Build Gun recipe availability.
+		const bool bFallbackAvailable = Fallback.bBasicTierAlwaysAvailable
+			|| (bBuildRecipeResolved && bBuildRecipeAvailable);
+		RegisterStandardMiner(BuildableClass, bFallbackAvailable);
+
+		UE_LOG(
+			LogSFPFactoryPlanner,
+			Display,
+			TEXT("Standard miner fallback: buildable=%s recipe=%s resolved=%d available=%d"),
+			Fallback.BuildablePath,
+			Fallback.BuildRecipePath,
+			bBuildRecipeResolved ? 1 : 0,
+			bFallbackAvailable ? 1 : 0);
+	}
+	if (bMinerDiagnostics)
+	{
+		MinerDiagnostics.Add(FString::Printf(
+			TEXT("STANDARD_CANDIDATES miners=%d"), Miners.Num()));
 	}
 	TArray<FOptionalBuildableInfo> SortedMiners;
 	Miners.GenerateValueArray(SortedMiners);
@@ -1989,34 +2603,101 @@ void FSFPPlannerSolver::BuildStandardMinerCatalog(
 		return A.ClassPath < B.ClassPath;
 	});
 	const TCHAR* PurityNames[] = { TEXT("Unrein"), TEXT("Normal"), TEXT("Rein") };
+	int32 TotalStandardRoutes = 0;
 	for (const FOptionalBuildableInfo& Info : SortedMiners)
 	{
 		const auto* CDO = Cast<AFGBuildableResourceExtractor>(Info.BuildableClass->GetDefaultObject());
-		const double Cycle = CDO->GetDefaultExtractCycleTime();
-		const double Amount = CDO->GetNumExtractedItemsPerCycle();
+		const int32 VanillaMinerTier = VanillaStandardMinerTier(Info.ClassPath);
+		const bool bVanillaStandardMiner = VanillaMinerTier > 0;
+		double Cycle = IsValid(CDO) ? CDO->GetDefaultExtractCycleTime() : 0.0;
+		double Amount = IsValid(CDO) ? CDO->GetNumExtractedItemsPerCycle() : 0.0;
+		// Defensive vanilla fallback. Some modded CDO patching can leave the generic
+		// extractor accessors at zero during early catalog initialization even though
+		// the vanilla miner itself is valid. Preserve authoritative CDO values when
+		// present; only use the known vanilla base rates for invalid zero values.
+		if ((!FMath::IsFinite(Cycle) || Cycle <= KINDA_SMALL_NUMBER
+			|| !FMath::IsFinite(Amount) || Amount <= KINDA_SMALL_NUMBER)
+			&& bVanillaStandardMiner)
+		{
+			Amount = 1.0;
+			Cycle = VanillaMinerTier == 3 ? 0.25
+				: VanillaMinerTier == 2 ? 0.5 : 1.0;
+		}
 		// Respect extraction restrictions instead of assuming any miner can mine anything.
 		const FArrayProperty* Forms = CastField<FArrayProperty>(Info.BuildableClass->FindPropertyByName(TEXT("mAllowedResourceForms")));
-		bool bSolidAllowed = false;
+		// Vanilla miners can leave this optional list empty. Empty/absent means the
+		// extractor's native node restriction decides; an explicit non-empty list is
+		// authoritative and must contain RF_SOLID.
+		bool bReflectedSolidAllowed = Forms == nullptr;
+		int32 AllowedFormCount = 0;
 		if (Forms != nullptr)
 		{
 			FScriptArrayHelper Values(Forms, Forms->ContainerPtrToValuePtr<void>(CDO));
+			AllowedFormCount = Values.Num();
+			bReflectedSolidAllowed = Values.Num() == 0;
 			const FEnumProperty* Enum = CastField<FEnumProperty>(Forms->Inner);
 			const FNumericProperty* Numeric = Enum != nullptr ? Enum->GetUnderlyingProperty() : CastField<FNumericProperty>(Forms->Inner);
 			for (int32 I = 0; Numeric != nullptr && I < Values.Num(); ++I)
 			{
-				bSolidAllowed |= Numeric->GetSignedIntPropertyValue(Values.GetRawPtr(I)) == static_cast<int64>(EResourceForm::RF_SOLID);
+				bReflectedSolidAllowed |= Numeric->GetSignedIntPropertyValue(Values.GetRawPtr(I)) == static_cast<int64>(EResourceForm::RF_SOLID);
 			}
 		}
-		if (!bSolidAllowed) { continue; }
+		const bool bSolidAllowed = bVanillaStandardMiner || bReflectedSolidAllowed;
 		UClass* NodeRestriction = ReflectedClassValue(CDO, Info.BuildableClass, TEXT("mRestrictToNodeType"));
-		if (IsValid(NodeRestriction) && !AFGResourceNode::StaticClass()->IsChildOf(NodeRestriction)) { continue; }
 		TArray<UClass*> Allowed;
 		ReflectedClassArray(CDO, Info.BuildableClass, TEXT("mAllowedResources"), Allowed);
-		const bool bRestricted = ReflectedBoolValue(CDO, Info.BuildableClass, TEXT("mOnlyAllowCertainResources"), true);
+		// Missing restriction metadata must not turn the vanilla empty allow-list into
+		// "allow nothing". Only an explicitly true property activates the list.
+		const bool bReflectedRestricted = ReflectedBoolValue(
+			CDO, Info.BuildableClass, TEXT("mOnlyAllowCertainResources"), false);
+		const bool bRestricted = !bVanillaStandardMiner && bReflectedRestricted;
+		const bool bReflectedNodeTypeAllowed = !IsValid(NodeRestriction)
+			|| AFGResourceNode::StaticClass()->IsChildOf(NodeRestriction);
+		const bool bNodeTypeAllowed = bVanillaStandardMiner
+			|| bReflectedNodeTypeAllowed;
+		if (bMinerDiagnostics)
+		{
+			MinerDiagnostics.Add(FString::Printf(
+				TEXT("STANDARD_FILTER class=%s vanillaTier=%d cycle=%g amount=%g forms=%d reflectedSolid=%d appliedSolid=%d node=%s reflectedNodeAllowed=%d appliedNodeAllowed=%d reflectedRestricted=%d appliedRestricted=%d allowedResources=%d available=%d"),
+				*Info.ClassPath,
+				VanillaMinerTier,
+				Cycle,
+				Amount,
+				AllowedFormCount,
+				bReflectedSolidAllowed ? 1 : 0,
+				bSolidAllowed ? 1 : 0,
+				IsValid(NodeRestriction) ? *NodeRestriction->GetPathName() : TEXT("<none>"),
+				bReflectedNodeTypeAllowed ? 1 : 0,
+				bNodeTypeAllowed ? 1 : 0,
+				bReflectedRestricted ? 1 : 0,
+				bRestricted ? 1 : 0,
+				Allowed.Num(),
+				Info.bAvailable ? 1 : 0));
+		}
+		if (!bSolidAllowed || !bNodeTypeAllowed) { continue; }
+		int32 RoutesForMiner = 0;
 		for (const TCHAR* ResourcePath : NodeResources)
 		{
-			UClass* ResourceClass = LoadObject<UClass>(nullptr, ResourcePath);
+			UClass* ResourceClass = LoadClass<UFGResourceDescriptor>(nullptr, ResourcePath);
 			if (!IsValid(ResourceClass) || !ResourceClass->IsChildOf(UFGResourceDescriptor::StaticClass())) { continue; }
+			const TArray<int32>* ExistingResourceRoutes = RecipesByProduct.Find(ResourceClass);
+			const bool bHasModularRawRoute = ExistingResourceRoutes != nullptr
+				&& ExistingResourceRoutes->ContainsByPredicate([this](const int32 RecipeIndex)
+				{
+					return Recipes.IsValidIndex(RecipeIndex)
+						&& Recipes[RecipeIndex].ClassPath.StartsWith(TEXT("KAPI.ModularMinerRaw|"));
+				});
+			if (!SFPShouldAddStandardMinerRoute(bVanillaStandardMiner, bHasModularRawRoute))
+			{
+				if (bMinerDiagnostics)
+				{
+					MinerDiagnostics.Add(FString::Printf(
+						TEXT("STANDARD_RESOURCE_SKIPPED class=%s resource=%s reason=modular_raw_route"),
+						*Info.ClassPath,
+						*ResourceClass->GetPathName()));
+				}
+				continue;
+			}
 			const TSubclassOf<UFGItemDescriptor> Descriptor(ResourceClass);
 			if (!SFPStandardMinerRates::Supports(
 				UFGItemDescriptor::GetForm(Descriptor) == EResourceForm::RF_SOLID,
@@ -2033,6 +2714,9 @@ void FSFPPlannerSolver::BuildStandardMinerCatalog(
 				Recipe.MachineClass = Info.BuildableClass;
 				Recipe.MachineName = Info.DisplayName;
 				Recipe.BasePowerMW = Info.PowerMW;
+				Recipe.PowerExponent = FMath::Max(0.001, ReflectedNumberValue(
+					CDO, Info.BuildableClass, TEXT("mPowerConsumptionExponent"), 1.0));
+				Recipe.MachineConfig = ReadMachineRuntimeConfig(CDO, Info.BuildableClass);
 				Recipe.bDirectResourceExtraction = true;
 				Recipe.SourceName = ItemDisplayName(ResourceClass);
 				Recipe.ResourceNodeLabel = PurityNames[Purity];
@@ -2060,8 +2744,24 @@ void FSFPPlannerSolver::BuildStandardMinerCatalog(
 				}
 				++Option->RecipeCount;
 				Option->bHasAvailableRecipe |= Info.bAvailable;
+				++RoutesForMiner;
+				++TotalStandardRoutes;
 			}
 		}
+		if (bMinerDiagnostics)
+		{
+			MinerDiagnostics.Add(FString::Printf(
+				TEXT("STANDARD_RESULT class=%s routes=%d"),
+				*Info.ClassPath,
+				RoutesForMiner));
+		}
+	}
+	if (bMinerDiagnostics)
+	{
+		MinerDiagnostics.Add(FString::Printf(
+			TEXT("STANDARD_SUMMARY miners=%d routes=%d"),
+			Miners.Num(),
+			TotalStandardRoutes));
 	}
 }
 
@@ -2210,6 +2910,9 @@ void FSFPPlannerSolver::BuildFluidExtractorCatalog(
 			Recipe.MachineClass = Info.BuildableClass;
 			Recipe.MachineName = Info.DisplayName;
 			Recipe.BasePowerMW = Info.PowerMW;
+			Recipe.PowerExponent = FMath::Max(0.001, ReflectedNumberValue(
+				ExtractorCDO, Info.BuildableClass, TEXT("mPowerConsumptionExponent"), 1.0));
+			Recipe.MachineConfig = ReadMachineRuntimeConfig(ExtractorCDO, Info.BuildableClass);
 			Recipe.bDirectResourceExtraction = true;
 			Recipe.ResourceNodeLabel = bWaterExtractor
 				? TEXT("Wasserfläche")
@@ -2256,7 +2959,6 @@ void FSFPPlannerSolver::BuildOptionalModularMinerCatalog(
 	AFGRecipeManager* RecipeManager,
 	TMap<UClass*, TSharedPtr<FSFPProductOption>>& ProductsByClass)
 {
-	MinerDiagnostics.Reset();
 	auto TraceMinerObject = [this](const UObject* Object)
 	{
 		if (!bMinerDiagnostics || !IsValid(Object)) { return; }
@@ -2511,75 +3213,100 @@ void FSFPPlannerSolver::BuildOptionalModularMinerCatalog(
 			UClass* WasteAttachment = ReflectedClassValue(MinerCDO, Miner.BuildableClass, TEXT("mWasteProducerAttachmentClass"));
 			UClass* FluidAttachment = ReflectedClassValue(MinerCDO, Miner.BuildableClass, TEXT("mFluidAttachmentClass"));
 			if (!IsValid(DrillAttachment)) continue;
-			// Include optional fluid equipment as well as every required slot.
-			TArray<UClass*> ExtraSlots;
-			if (IsValid(FluidAttachment)) ExtraSlots.AddUnique(FluidAttachment);
+			// Fluid and booster equipment is optional for both raw extraction and
+			// processing routes. Processing-specific required modules are added per
+			// output below; otherwise mNeededModules (for example the Smelter Module)
+			// incorrectly removes every Mining-Head-only raw route.
+			TArray<UClass*> OptionalExtraSlots;
+			if (IsValid(FluidAttachment)) OptionalExtraSlots.AddUnique(FluidAttachment);
 			UClass* PowerAttachment = ReflectedClassValue(MinerCDO, Miner.BuildableClass, TEXT("mPowerShardAttachmentClass"));
-			if (IsValid(PowerAttachment)) ExtraSlots.AddUnique(PowerAttachment);
-			for (UClass* Needed : NeededModules)
-			{
-				if (ClassesMatch(Needed, DrillAttachment) || ClassesMatch(Needed, WasteAttachment)) continue;
-				for (const FOptionalModularMinerModule& Module : Modules)
-					if (ModuleMatchesSpecifier(Module, Needed)) ExtraSlots.AddUnique(Module.AttachmentClass);
-			}
-			ExtraSlots.Sort([](const UClass& A, const UClass& B) { return A.GetPathName() < B.GetPathName(); });
-			TArray<TArray<const FOptionalModularMinerModule*>> Extras;
-			Extras.Add(TArray<const FOptionalModularMinerModule*>());
-			for (UClass* Slot : ExtraSlots)
-			{
-				TArray<TArray<const FOptionalModularMinerModule*>> Next = Extras; // Optional empty slot; validated below.
-				for (const auto& Existing : Extras)
-					for (const FOptionalModularMinerModule& Module : Modules)
-						if (ClassesMatch(Module.AttachmentClass, Slot) && !IsValid(Module.WasteClass))
-						{
-							auto Combination = Existing;
-							Combination.Add(&Module);
-							Next.Add(MoveTemp(Combination));
-						}
-				Extras = MoveTemp(Next);
-			}
+			if (IsValid(PowerAttachment)) OptionalExtraSlots.AddUnique(PowerAttachment);
 			for (const FOutputChoice& Output : Outputs)
-			for (const FOptionalModularMinerModule& Drill : Modules)
 			{
-				if (!ClassesMatch(Drill.AttachmentClass, DrillAttachment) || IsValid(Drill.WasteClass) || Drill.Tier < NeededDrillTier) continue;
-				TArray<const FOptionalModularMinerModule*> WasteOptions;
-				if (!Output.Waste) WasteOptions.Add(nullptr);
-				else for (const FOptionalModularMinerModule& Module : Modules)
-					if (ClassesMatch(Module.AttachmentClass, WasteAttachment) && ClassesMatch(Module.WasteClass, Output.Waste)) WasteOptions.Add(&Module);
-				for (const FOptionalModularMinerModule* Waste : WasteOptions)
-				for (const auto& Extra : Extras)
+				const bool bRawMiningOutput = !IsValid(Output.Waste)
+					&& Output.Item == ResourceClass;
+				TArray<UClass*> ExtraSlots = OptionalExtraSlots;
+				if (!bRawMiningOutput)
 				{
-					TArray<const FOptionalModularMinerModule*> Loadout = Extra;
-					Loadout.Add(&Drill);
-					if (Waste) Loadout.Add(Waste);
-					bool bValid = true;
-					for (int32 A = 0; A < Loadout.Num(); ++A)
-					for (int32 B = A + 1; B < Loadout.Num(); ++B)
-						if (ClassesMatch(Loadout[A]->AttachmentClass, Loadout[B]->AttachmentClass)) bValid = false;
-					if (!SFPMinerRates::RequiredPresent(Loadout, NeededModules,
-						[&](const FOptionalModularMinerModule* M, UClass* Needed) { return ModuleMatchesSpecifier(*M, Needed); })) bValid = false;
-					for (UClass* Forbidden : PreventedModules)
-						if (Loadout.ContainsByPredicate([&](const FOptionalModularMinerModule* M) { return ModuleMatchesSpecifier(*M, Forbidden); })) bValid = false;
-					if (!bValid) continue;
-					const bool bFluid = Loadout.ContainsByPredicate([&](const FOptionalModularMinerModule* M) { return ClassesMatch(M->AttachmentClass, FluidAttachment); });
-					TArray<FFluidChoice> Choices = bFluid ? Fluids : TArray<FFluidChoice>();
-					if (!bFluid) Choices.Add(FFluidChoice());
-					for (const FFluidChoice& Fluid : Choices)
-					for (const FPurityVariant& Purity : Purities)
+					for (UClass* Needed : NeededModules)
 					{
-						double Bonus = Fluid.Bonus, MalusMultiplier = 1.0, Power = Miner.PowerMW;
-						bool bAvailable = Miner.bAvailable;
-						TArray<FString> ModulePaths, ModuleNames;
-						for (const FOptionalModularMinerModule* Module : Loadout)
+						if (ClassesMatch(Needed, DrillAttachment)
+							|| ClassesMatch(Needed, WasteAttachment)) continue;
+						for (const FOptionalModularMinerModule& Module : Modules)
 						{
-							Bonus += Module->Bonus;
-							if (IsValid(Module->WasteClass)) { if (Module->Malus > 0) MalusMultiplier *= Module->Malus; }
-							else Bonus -= Module->Malus;
-							Power += Module->PowerMW;
-							bAvailable &= Module->bAvailable;
-							ModulePaths.Add(Module->ClassPath);
-							ModuleNames.Add(Module->DisplayName);
+							if (ModuleMatchesSpecifier(Module, Needed))
+							{
+								ExtraSlots.AddUnique(Module.AttachmentClass);
+							}
 						}
+					}
+				}
+				ExtraSlots.Sort([](const UClass& A, const UClass& B)
+				{
+					return A.GetPathName() < B.GetPathName();
+				});
+				TArray<TArray<const FOptionalModularMinerModule*>> Extras;
+				Extras.Add(TArray<const FOptionalModularMinerModule*>());
+				for (UClass* Slot : ExtraSlots)
+				{
+					TArray<TArray<const FOptionalModularMinerModule*>> Next = Extras;
+					for (const auto& Existing : Extras)
+					{
+						for (const FOptionalModularMinerModule& Module : Modules)
+						{
+							if (ClassesMatch(Module.AttachmentClass, Slot)
+								&& !IsValid(Module.WasteClass))
+							{
+								auto Combination = Existing;
+								Combination.Add(&Module);
+								Next.Add(MoveTemp(Combination));
+							}
+						}
+					}
+					Extras = MoveTemp(Next);
+				}
+				for (const FOptionalModularMinerModule& Drill : Modules)
+				{
+					if (!ClassesMatch(Drill.AttachmentClass, DrillAttachment) || IsValid(Drill.WasteClass) || Drill.Tier < NeededDrillTier) continue;
+					TArray<const FOptionalModularMinerModule*> WasteOptions;
+					if (!Output.Waste) WasteOptions.Add(nullptr);
+					else for (const FOptionalModularMinerModule& Module : Modules)
+						if (ClassesMatch(Module.AttachmentClass, WasteAttachment) && ClassesMatch(Module.WasteClass, Output.Waste)) WasteOptions.Add(&Module);
+					for (const FOptionalModularMinerModule* Waste : WasteOptions)
+					for (const auto& Extra : Extras)
+					{
+						TArray<const FOptionalModularMinerModule*> Loadout = Extra;
+						Loadout.Add(&Drill);
+						if (Waste) Loadout.Add(Waste);
+						bool bValid = true;
+						for (int32 A = 0; A < Loadout.Num(); ++A)
+						for (int32 B = A + 1; B < Loadout.Num(); ++B)
+							if (ClassesMatch(Loadout[A]->AttachmentClass, Loadout[B]->AttachmentClass)) bValid = false;
+						if (SFPRequiredModulesApplyToMinerOutput(bRawMiningOutput)
+							&& !SFPMinerRates::RequiredPresent(Loadout, NeededModules,
+							[&](const FOptionalModularMinerModule* M, UClass* Needed) { return ModuleMatchesSpecifier(*M, Needed); })) bValid = false;
+						for (UClass* Forbidden : PreventedModules)
+							if (Loadout.ContainsByPredicate([&](const FOptionalModularMinerModule* M) { return ModuleMatchesSpecifier(*M, Forbidden); })) bValid = false;
+						if (!bValid) continue;
+						const bool bFluid = Loadout.ContainsByPredicate([&](const FOptionalModularMinerModule* M) { return ClassesMatch(M->AttachmentClass, FluidAttachment); });
+						TArray<FFluidChoice> Choices = bFluid ? Fluids : TArray<FFluidChoice>();
+						if (!bFluid) Choices.Add(FFluidChoice());
+						for (const FFluidChoice& Fluid : Choices)
+						for (const FPurityVariant& Purity : Purities)
+						{
+							double Bonus = Fluid.Bonus, MalusMultiplier = 1.0, Power = Miner.PowerMW;
+							bool bAvailable = Miner.bAvailable;
+							TArray<FString> ModulePaths, ModuleNames;
+							for (const FOptionalModularMinerModule* Module : Loadout)
+							{
+								Bonus += Module->Bonus;
+								if (IsValid(Module->WasteClass)) { if (Module->Malus > 0) MalusMultiplier *= Module->Malus; }
+								else Bonus -= Module->Malus;
+								Power += Module->PowerMW;
+								bAvailable &= Module->bAvailable;
+								ModulePaths.Add(Module->ClassPath);
+								ModuleNames.Add(Module->DisplayName);
+							}
 						const double Cycle = SFPMinerRates::Cycle(Purity.Multiplier, Bonus, MalusMultiplier);
 						const double Amount = static_cast<double>(FMath::Max(1, FMath::FloorToInt(ReflectedNumberValue(MinerCDO, Miner.BuildableClass, TEXT("mItemsPerCycle"), 1) * ModularMinerTierMultiplier(Drill.Tier))));
 						const double Rate = SFPMinerRates::Output(Amount, Cycle, ModularMinerBeltOutputs);
@@ -2595,6 +3322,9 @@ void FSFPPlannerSolver::BuildOptionalModularMinerCatalog(
 						Recipe.MachineClass = Miner.BuildableClass;
 						Recipe.MachineName = Miner.DisplayName;
 						Recipe.BasePowerMW = Power;
+						Recipe.PowerExponent = FMath::Max(0.001, ReflectedNumberValue(
+							MinerCDO, Miner.BuildableClass, TEXT("mPowerConsumptionExponent"), 1.0));
+						Recipe.MachineConfig = ReadMachineRuntimeConfig(MinerCDO, Miner.BuildableClass);
 						Recipe.AdditionalBuildableClassPaths = ModulePaths;
 						Recipe.bDirectResourceExtraction = true;
 						Recipe.ResourceNodeLabel = Purity.Label;
@@ -2643,6 +3373,7 @@ void FSFPPlannerSolver::BuildOptionalModularMinerCatalog(
 							Option->bHasAvailableRecipe |= bAvailable;
 						}
 						++AddedRoutes;
+						}
 					}
 				}
 			}
@@ -2708,6 +3439,10 @@ void FSFPPlannerSolver::GetRecipeOptionsForItemPath(
 		Option->RecipeClassPath = Recipe.ClassPath;
 		Option->DisplayName = Recipe.DisplayName;
 		Option->MachineName = Recipe.MachineName;
+		Option->MachineClassPath = IsValid(Recipe.MachineClass) ? Recipe.MachineClass->GetPathName() : FString();
+		Option->MachineConfig = Recipe.MachineConfig;
+		Option->bFuelPowered = Recipe.bFuelPowered;
+		Option->FuelOptions = Recipe.FuelOptions;
 		Option->SourceMount = Recipe.SourceMount;
 		Option->bAvailable = Recipe.bAvailable;
 		Option->Category = Recipe.bDirectResourceExtraction ? TEXT("Direktabbau / Förderung")
@@ -2736,6 +3471,20 @@ void FSFPPlannerSolver::GetRecipeOptionsForItemPath(
 		if (Left->bAvailable != Right->bAvailable)
 		{
 			return Left->bAvailable;
+		}
+		auto CategoryRank = [](const FString& Category)
+		{
+			if (Category == TEXT("Direktabbau / Förderung")) return 0;
+			if (Category == TEXT("Standardrezepte")) return 1;
+			if (Category == TEXT("Alternative Rezepte")) return 2;
+			if (Category == TEXT("Umwandlung")) return 3;
+			return 4;
+		};
+		const int32 LeftRank = CategoryRank(Left->Category);
+		const int32 RightRank = CategoryRank(Right->Category);
+		if (LeftRank != RightRank)
+		{
+			return LeftRank < RightRank;
 		}
 		return Left->DisplayName.Compare(Right->DisplayName, ESearchCase::IgnoreCase) < 0;
 	});
@@ -2862,7 +3611,9 @@ void FSFPPlannerSolver::AddConstructionCosts(FSFPPlanResult& Result) const
 			&& Node.MachineCount > 0.0)
 		{
 			const double BuiltMachineCount = static_cast<double>(
-				FMath::Max(1, FMath::CeilToInt(Node.MachineCount)));
+				Node.BuiltMachineCount > 0
+					? Node.BuiltMachineCount
+					: FMath::Max(1, FMath::CeilToInt(Node.MachineCount)));
 			AddScaledCosts(
 				MachineTotals,
 				Node.ClassPath,
@@ -3162,7 +3913,10 @@ int32 FSFPPlannerSolver::FindRecipeFor(
 			&& Recipe.ResourceNodeLabel.Equals(TEXT("Normal"), ESearchCase::IgnoreCase)
 			? 20
 			: 0;
-		Score += Recipe.bDirectResourceExtraction ? 2000 : 0;
+		// Prefer extraction only when it really produces the resource itself.
+		// A modular miner that turns an ore into a processed item stays available
+		// as an explicit choice, but must not outrank that item's normal recipe.
+		Score += bDirectSelfExtraction ? 2000 : 0;
 		Score -= Recipe.AdditionalBuildableClassPaths.Num() * 10;
 		Score -= Recipe.Ingredients.Num() * 3;
 		Score -= FMath::Max(0, Recipe.Products.Num() - 1);
@@ -3423,7 +4177,60 @@ int32 FSFPPlannerSolver::BuildDemand(
 		}
 	}
 
-	const double AddedMachineCount = RequiredRate / TargetProduct->RatePerMinute;
+	FSFPMachinePlanSettings OperatingSettings;
+	if (const FSFPMachinePlanSettings* SavedSettings = Context.MachineSettings.Find(Recipe.ClassPath))
+	{
+		OperatingSettings = *SavedSettings;
+	}
+
+	double ConfiguredClock = FMath::Max(0.001, OperatingSettings.ClockPercent / 100.0);
+	if (!Recipe.MachineConfig.bCanChangePotential)
+	{
+		ConfiguredClock = 1.0;
+	}
+	else
+	{
+		ConfiguredClock = FMath::Max(Recipe.MachineConfig.MinPotential, ConfiguredClock);
+		if (Recipe.MachineConfig.bRuntimeMaxPotentialKnown)
+		{
+			ConfiguredClock = FMath::Min(Recipe.MachineConfig.MaxPotential, ConfiguredClock);
+		}
+		else
+		{
+			// Do not hardcode vanilla's shard limit. Modded machines can expose a
+			// different maximum; until runtime reports it, keep only a safety cap.
+			ConfiguredClock = FMath::Min(10.0, ConfiguredClock);
+		}
+	}
+
+	int32 SomersloopCount = FMath::Max(0, OperatingSettings.SomersloopCount);
+	if (!Recipe.MachineConfig.bCanChangeProductionBoost
+		|| Recipe.MachineConfig.ProductionBoostPerSloop <= KINDA_SMALL_NUMBER)
+	{
+		SomersloopCount = 0;
+	}
+	else if (Recipe.MachineConfig.bRuntimeMaxProductionBoostKnown)
+	{
+		SomersloopCount = FMath::Min(SomersloopCount, Recipe.MachineConfig.MaxSomersloops);
+	}
+	else
+	{
+		SomersloopCount = FMath::Min(SomersloopCount, 64);
+	}
+
+	double ProductionBoost = Recipe.MachineConfig.BaseProductionBoost
+		+ static_cast<double>(SomersloopCount) * Recipe.MachineConfig.ProductionBoostPerSloop;
+	ProductionBoost = FMath::Max(0.001, ProductionBoost);
+	if (Recipe.MachineConfig.bRuntimeMaxProductionBoostKnown)
+	{
+		ProductionBoost = FMath::Min(Recipe.MachineConfig.MaxProductionBoost, ProductionBoost);
+	}
+
+	// Somersloops amplify products without multiplying recipe inputs. Therefore
+	// target output first becomes an unboosted output-equivalent, then a smaller
+	// cycle-equivalent used for ingredient demand and machine clock distribution.
+	const double AddedOutputEquivalent = RequiredRate / TargetProduct->RatePerMinute;
+	const double AddedMachineCount = AddedOutputEquivalent / ProductionBoost;
 	int32 MachineNodeId = INDEX_NONE;
 	if (const int32* ExistingNodeId = Context.ProviderNodeByItem.Find(ItemClass))
 	{
@@ -3449,45 +4256,119 @@ int32 FSFPPlannerSolver::BuildDemand(
 	MachineNode.Depth = FMath::Max(MachineNode.Depth, Depth);
 	MachineNode.RatePerMinute += RequiredRate;
 	MachineNode.MachineCount += AddedMachineCount;
+	MachineNode.ConfiguredClockPercent = ConfiguredClock * 100.0;
+	MachineNode.SomersloopCount = SomersloopCount;
+	MachineNode.ProductionBoost = ProductionBoost;
+	MachineNode.bFuelPowered = Recipe.bFuelPowered;
 	const double PreviousPower = MachineNode.PowerMW;
-	MachineNode.PowerMW = SFPVariablePower::ClockedPower(Recipe.BasePowerMW, MachineNode.MachineCount, Recipe.PowerExponent);
-	const int32 WholeMachines = FMath::Max(1, FMath::CeilToInt(MachineNode.MachineCount));
-	const int32 FullyClockedMachines = FMath::FloorToInt(MachineNode.MachineCount + KINDA_SMALL_NUMBER);
-	const double PartialClockPercent = FMath::Max(
-		0.0,
-		(MachineNode.MachineCount - static_cast<double>(FullyClockedMachines)) * 100.0);
-	FString Clocking;
-	if (PartialClockPercent > 0.05)
+	const double PreviousFuelRate = MachineNode.FuelRatePerMinute;
+	const SFPVariablePower::ConfiguredClocking ClockingResult = SFPVariablePower::ClockedPowerConfigured(
+		Recipe.BasePowerMW,
+		MachineNode.MachineCount,
+		ConfiguredClock,
+		Recipe.PowerExponent,
+		ProductionBoost,
+		Recipe.MachineConfig.ProductionBoostPowerExponent);
+	MachineNode.PowerMW = ClockingResult.Power;
+	MachineNode.BuiltMachineCount = FMath::Max(1, ClockingResult.BuiltMachines);
+	MachineNode.FullClockMachineCount = FMath::Max(0, ClockingResult.FullClockMachines);
+	MachineNode.PartialClockPercent = FMath::Max(0.0, ClockingResult.PartialClock * 100.0);
+
+	const FSFPPlannerFuelOption* SelectedFuel = nullptr;
+	if (Recipe.bFuelPowered)
 	{
-		Clocking = FullyClockedMachines > 0
+		if (!OperatingSettings.FuelClassPath.IsEmpty())
+		{
+			SelectedFuel = Recipe.FuelOptions.FindByPredicate([&OperatingSettings](const FSFPPlannerFuelOption& Fuel)
+			{
+				return Fuel.ClassPath == OperatingSettings.FuelClassPath;
+			});
+		}
+		if (SelectedFuel == nullptr && !Recipe.FuelOptions.IsEmpty())
+		{
+			// FuelOptions are sorted by class path while the catalog is built.
+			// This gives deterministic automatic selection without a hard dependency
+			// on BurnerManufacturer or on any particular vanilla/mod fuel.
+			SelectedFuel = &Recipe.FuelOptions[0];
+		}
+		if (SelectedFuel != nullptr && SelectedFuel->EnergyValueMJ > KINDA_SMALL_NUMBER)
+		{
+			MachineNode.FuelClassPath = SelectedFuel->ClassPath;
+			MachineNode.FuelDisplayName = SelectedFuel->DisplayName;
+			MachineNode.FuelForm = SelectedFuel->Form;
+			MachineNode.FuelEnergyValueMJ = SelectedFuel->EnergyValueMJ;
+			MachineNode.FuelRatePerMinute = MachineNode.PowerMW * 60.0 / SelectedFuel->EnergyValueMJ;
+			if (SelectedFuel->Form == TEXT("liquid") || SelectedFuel->Form == TEXT("gas"))
+			{
+				MachineNode.FuelRatePerMinute /= 1000.0;
+			}
+		}
+		else
+		{
+			Context.Result.Warnings.AddUnique(FString::Printf(
+				TEXT("Für Brennermaschine %s konnte kein gültiger Brennstoff mit Energiewert ermittelt werden"),
+				*Recipe.MachineName));
+		}
+	}
+
+	FString Clocking;
+	if (MachineNode.PartialClockPercent > 0.05)
+	{
+		Clocking = MachineNode.FullClockMachineCount > 0
 			? FString::Printf(
-				TEXT("%d × 100%% + 1 × %s%%"),
-				FullyClockedMachines,
-				*FSFPNumberFormatting::Decimal(PartialClockPercent, 1))
-			: FString::Printf(
-				TEXT("1 × %s%%"),
-				*FSFPNumberFormatting::Decimal(PartialClockPercent, 1));
+				TEXT("%d × %s%% + 1 × %s%%"),
+				MachineNode.FullClockMachineCount,
+				*FSFPNumberFormatting::Decimal(MachineNode.ConfiguredClockPercent, 1),
+				*FSFPNumberFormatting::Decimal(MachineNode.PartialClockPercent, 1))
+			: FString::Printf(TEXT("1 × %s%%"), *FSFPNumberFormatting::Decimal(MachineNode.PartialClockPercent, 1));
 	}
 	else
 	{
-		Clocking = FString::Printf(TEXT("%d × 100%%"), WholeMachines);
+		Clocking = FString::Printf(
+			TEXT("%d × %s%%"),
+			MachineNode.BuiltMachineCount,
+			*FSFPNumberFormatting::Decimal(MachineNode.ConfiguredClockPercent, 1));
 	}
 	if (Recipe.bVariablePower)
+	{
 		Context.Result.Warnings.AddUnique(TEXT("Variable Rezeptleistung: Die Leistungssumme verwendet numerische Zyklusmittelwerte. Spitzen können höher liegen; Netzreserve einplanen."));
+	}
 	const FString ConfigurationLine = Recipe.ConfigurationDetail.IsEmpty()
 		? FString()
 		: FString::Printf(TEXT("\n%s"), *Recipe.ConfigurationDetail);
+	const FString BoostLine = SomersloopCount > 0
+		? FString::Printf(
+			TEXT("\nSomersloops: %d je Maschine | Produktionsverstärkung: %s%%"),
+			SomersloopCount,
+			*FSFPNumberFormatting::Decimal(ProductionBoost * 100.0, 1))
+		: FString();
+	const FString PowerLabel = Recipe.bFuelPowered ? TEXT("Brennleistung") : TEXT("Strombedarf");
 	MachineNode.Detail = FString::Printf(
-		TEXT("%s%s\n%d Maschinen gebaut | %s\nStrombedarf bei geplanter Taktung: %s MW"),
+		TEXT("%s%s\n%d Maschinen gebaut | %s%s\n%s bei geplanter Taktung: %s MW"),
 		*Recipe.DisplayName,
 		*ConfigurationLine,
-		WholeMachines,
+		MachineNode.BuiltMachineCount,
 		*Clocking,
+		*BoostLine,
+		*PowerLabel,
 		*FSFPNumberFormatting::Decimal(MachineNode.PowerMW, 2));
+	if (Recipe.bFuelPowered && SelectedFuel != nullptr)
+	{
+		MachineNode.Detail += FString::Printf(
+			TEXT("\nBrennstoff: %s | %s/min | %s MJ"),
+			*SelectedFuel->DisplayName,
+			*FSFPNumberFormatting::Decimal(MachineNode.FuelRatePerMinute, 3),
+			*FSFPNumberFormatting::Decimal(SelectedFuel->EnergyValueMJ, 1));
+	}
 	if (Recipe.bVariablePower)
+	{
 		MachineNode.Detail += TEXT("\nZyklusmittelwert bei variablem Verbrauch");
+	}
 	Context.Result.TotalEquivalentMachines += AddedMachineCount;
-	Context.Result.TotalBasePowerMW += MachineNode.PowerMW - PreviousPower;
+	if (!Recipe.bFuelPowered)
+	{
+		Context.Result.TotalBasePowerMW += MachineNode.PowerMW - PreviousPower;
+	}
 	AddEdgeToConsumer(MachineNodeId);
 
 	Context.RecursionStack.Add(ItemClass);
@@ -3530,10 +4411,11 @@ int32 FSFPPlannerSolver::BuildDemand(
 		FSFPPlanNode& ResourceNode = Context.Result.Nodes[ResourceNodeId];
 		ResourceNode.Depth = FMath::Max(ResourceNode.Depth, Depth + 1);
 		ResourceNode.RatePerMinute += IngredientRate;
-		ResourceNode.MachineCount += AddedMachineCount;
+		ResourceNode.MachineCount = static_cast<double>(MachineNode.BuiltMachineCount);
+		ResourceNode.BuiltMachineCount = MachineNode.BuiltMachineCount;
 		ResourceNode.Detail = FString::Printf(
 			TEXT("%d × %s-Knoten | %s/min Abbauäquivalent"),
-			FMath::Max(1, FMath::CeilToInt(ResourceNode.MachineCount)),
+			MachineNode.BuiltMachineCount,
 			*Recipe.ResourceNodeLabel,
 			*FSFPNumberFormatting::Decimal(ResourceNode.RatePerMinute));
 		AddOrMergeEdge(
@@ -3544,6 +4426,22 @@ int32 FSFPPlannerSolver::BuildDemand(
 			Ingredient.Form,
 			IngredientRate,
 			true);
+	}
+
+	if (Recipe.bFuelPowered && SelectedFuel != nullptr)
+	{
+		const double AddedFuelRate = FMath::Max(0.0, MachineNode.FuelRatePerMinute - PreviousFuelRate);
+		if (AddedFuelRate > KINDA_SMALL_NUMBER)
+		{
+			BuildDemand(
+				SelectedFuel->ItemClass.Get(),
+				SelectedFuel->DisplayName,
+				SelectedFuel->Form,
+				AddedFuelRate,
+				MachineNodeId,
+				Depth + 1,
+				Context);
+		}
 	}
 	Context.RecursionStack.Remove(ItemClass);
 
@@ -3572,7 +4470,7 @@ int32 FSFPPlannerSolver::BuildDemand(
 			Context.ByproductNodeByKey.Add(ByproductKey, ByproductNodeId);
 		}
 
-		const double ByproductRate = AddedMachineCount * Product.RatePerMinute;
+		const double ByproductRate = AddedMachineCount * Product.RatePerMinute * ProductionBoost;
 		FSFPPlanNode& ByproductNode = Context.Result.Nodes[ByproductNodeId];
 		ByproductNode.RatePerMinute += ByproductRate;
 		ByproductNode.Detail = FString::Printf(
@@ -3945,7 +4843,8 @@ FSFPPlanResult FSFPPlannerSolver::Solve(
 	const TMap<FString, FString>& RecipeOverrides,
 	const double EstimatedConnectionLengthMeters,
 	const FString& SelectedConveyorClassPath,
-	const FString& SelectedConveyorLiftClassPath) const
+	const FString& SelectedConveyorLiftClassPath,
+	const TMap<FString, FSFPMachinePlanSettings>& MachineSettings) const
 {
 	FSFPPlanTarget Target;
 	Target.ItemClass = TargetItem;
@@ -3964,7 +4863,10 @@ FSFPPlanResult FSFPPlannerSolver::Solve(
 		RecipeOverrides,
 		EstimatedConnectionLengthMeters,
 		SelectedConveyorClassPath,
-		SelectedConveyorLiftClassPath);
+		SelectedConveyorLiftClassPath,
+		TMap<FString, double>(),
+		true,
+		MachineSettings);
 }
 
 FSFPPlanResult FSFPPlannerSolver::Solve(
@@ -3974,7 +4876,9 @@ FSFPPlanResult FSFPPlannerSolver::Solve(
 	const double EstimatedConnectionLengthMeters,
 	const FString& SelectedConveyorClassPath,
 	const FString& SelectedConveyorLiftClassPath,
-	const TMap<FString, double>& SuppliedInputs, const bool bEnforceSupplyLimits) const
+	const TMap<FString, double>& SuppliedInputs,
+	const bool bEnforceSupplyLimits,
+	const TMap<FString, FSFPMachinePlanSettings>& MachineSettings) const
 {
 	FSolveContext Context;
     Context.Result.SuppliedInputRates = SuppliedInputs;
@@ -4036,7 +4940,9 @@ FSFPPlanResult FSFPPlannerSolver::Solve(
 
 	Context.bOnlyAvailableRecipes = bOnlyAvailableRecipes;
 	Context.RecipeOverrides = RecipeOverrides;
+	Context.MachineSettings = MachineSettings;
 	Context.Result.RecipeOverrides = RecipeOverrides;
+	Context.Result.MachineSettings = MachineSettings;
 	Context.Result.bOnlyAvailableRecipes = bOnlyAvailableRecipes;
 	Context.Result.EstimatedConnectionLengthMeters = FMath::Clamp(EstimatedConnectionLengthMeters, 0.5, 1000.0);
 
@@ -4183,6 +5089,40 @@ FSFPPlanResult FSFPPlannerSolver::SolvePower(const FSFPPowerPlanRequest& Request
 		InvalidResult.ErrorMessage = TEXT("Die Leistungsreserve muss zwischen 0 und 500 Prozent liegen");
 		return InvalidResult;
 	}
+	if (!FMath::IsFinite(Request.GeneratorClockPercent)
+		|| Request.GeneratorClockPercent < 1.0
+		|| Request.GeneratorClockPercent > 100000.0)
+	{
+		InvalidResult.ErrorMessage = TEXT("Der Generator-Takt muss zwischen 1 und 100000 Prozent liegen");
+		return InvalidResult;
+	}
+	if (Request.PassiveAlienPowerAugmenters < 0 || Request.FueledAlienPowerAugmenters < 0
+		|| Request.PassiveAlienPowerAugmenters > 10000 || Request.FueledAlienPowerAugmenters > 10000)
+	{
+		InvalidResult.ErrorMessage = TEXT("Die Anzahl der Alien Power Augmenter ist ungültig");
+		return InvalidResult;
+	}
+	const int32 RequestedAlienPowerAugmenters = Request.PassiveAlienPowerAugmenters
+		+ Request.FueledAlienPowerAugmenters;
+	if (RequestedAlienPowerAugmenters > 0)
+	{
+		if (!IsValid(AlienPowerAugmenter.BuildableClass))
+		{
+			InvalidResult.ErrorMessage = TEXT("Alien Power Augmenter konnte im aktiven Spielstand nicht gefunden werden");
+			return InvalidResult;
+		}
+		if (Request.bOnlyAvailable && !AlienPowerAugmenter.bAvailable)
+		{
+			InvalidResult.ErrorMessage = TEXT("Alien Power Augmenter ist in diesem Spielstand noch nicht freigeschaltet");
+			return InvalidResult;
+		}
+		if (Request.FueledAlienPowerAugmenters > 0
+			&& !IsValid(AlienPowerAugmenter.MatrixItemClass.Get()))
+		{
+			InvalidResult.ErrorMessage = TEXT("Alien Power Matrix konnte für den gespeisten Power Augmenter nicht gefunden werden");
+			return InvalidResult;
+		}
+	}
 	if (PowerGenerators.IsEmpty())
 	{
 		InvalidResult.ErrorMessage = TEXT("Keine vollständigen Stromerzeuger im aktiven Baukatalog gefunden");
@@ -4201,6 +5141,13 @@ FSFPPlanResult FSFPPlannerSolver::SolvePower(const FSFPPowerPlanRequest& Request
 			|| (!Request.GeneratorClassPath.IsEmpty()
 				&& Generator->ClassPath != Request.GeneratorClassPath)
 			|| (Request.bOnlyAvailable && !Generator->bAvailable))
+		{
+			continue;
+		}
+		const double MinGeneratorClock = GeneratorMinClockPercent(*Generator);
+		const double MaxGeneratorClock = GeneratorMaxClockPercent(*Generator);
+		if (Request.GeneratorClockPercent + 0.001 < MinGeneratorClock
+			|| Request.GeneratorClockPercent > MaxGeneratorClock + 0.001)
 		{
 			continue;
 		}
@@ -4228,7 +5175,7 @@ FSFPPlanResult FSFPPlannerSolver::SolvePower(const FSFPPowerPlanRequest& Request
 
 	auto BuildCandidate = [this, &Request](
 		const FPowerCandidate& Candidate,
-		const double GrossPowerMW,
+		const double GeneratorGrossPowerMW,
 		FSFPPlanResult& OutResult) -> bool
 	{
 		OutResult = FSFPPlanResult();
@@ -4237,7 +5184,11 @@ FSFPPlanResult FSFPPlannerSolver::SolvePower(const FSFPPowerPlanRequest& Request
 		OutResult.PowerReservePercent = Request.ReservePercent;
 		OutResult.RequestedGeneratorClassPath = Request.GeneratorClassPath;
 		OutResult.RequestedFuelClassPath = Request.FuelClassPath;
+		OutResult.ConfiguredGeneratorClockPercent = Request.GeneratorClockPercent;
+		OutResult.PassiveAlienPowerAugmenters = FMath::Max(0, Request.PassiveAlienPowerAugmenters);
+		OutResult.FueledAlienPowerAugmenters = FMath::Max(0, Request.FueledAlienPowerAugmenters);
 		OutResult.RecipeOverrides = Request.RecipeOverrides;
+		OutResult.MachineSettings = Request.MachineSettings;
 		OutResult.bOnlyAvailableRecipes = Request.bOnlyAvailable;
 		OutResult.EstimatedConnectionLengthMeters = FMath::Clamp(
 			Request.EstimatedConnectionLengthMeters,
@@ -4248,10 +5199,28 @@ FSFPPlanResult FSFPPlannerSolver::SolvePower(const FSFPPowerPlanRequest& Request
 			|| Candidate.Generator->PowerProductionMW <= KINDA_SMALL_NUMBER
 			|| (!Candidate.Fuel->bFuelFree
 				&& Candidate.Fuel->EnergyValueMJ <= KINDA_SMALL_NUMBER)
-			|| !FMath::IsFinite(GrossPowerMW) || GrossPowerMW <= 0.0)
+			|| !FMath::IsFinite(GeneratorGrossPowerMW) || GeneratorGrossPowerMW < 0.0)
 		{
 			return false;
 		}
+
+		const SFPVariablePower::AlienAugmentation Augmentation = SFPVariablePower::ApplyAlienAugmentation(
+			GeneratorGrossPowerMW,
+			OutResult.PassiveAlienPowerAugmenters,
+			OutResult.FueledAlienPowerAugmenters,
+			AlienPowerAugmenter.BasePowerPerAugmenterMW,
+			AlienPowerAugmenter.PassiveBoostPerAugmenter,
+			AlienPowerAugmenter.FueledBoostPerAugmenter);
+		OutResult.BaseGeneratorGrossPowerMW = GeneratorGrossPowerMW;
+		OutResult.AlienPowerAugmenterBaseMW = static_cast<double>(
+			OutResult.PassiveAlienPowerAugmenters + OutResult.FueledAlienPowerAugmenters)
+			* AlienPowerAugmenter.BasePowerPerAugmenterMW;
+		OutResult.AlienPowerMultiplier = Augmentation.Multiplier;
+		OutResult.AlienPowerContributionMW = Augmentation.Contribution;
+		OutResult.AlienPowerMatrixItemClassPath = AlienPowerAugmenter.MatrixItemClassPath;
+		OutResult.AlienPowerMatrixDisplayName = AlienPowerAugmenter.MatrixDisplayName;
+		OutResult.AlienPowerMatrixRatePerMinute = static_cast<double>(OutResult.FueledAlienPowerAugmenters)
+			* AlienPowerAugmenter.MatrixRatePerMinute;
 
 		auto ResolveTransportTier = [this, &Request, &OutResult](
 			const FString& Kind,
@@ -4305,12 +5274,21 @@ FSFPPlanResult FSFPPlannerSolver::SolvePower(const FSFPPowerPlanRequest& Request
 		OutResult.SelectedFuelClassPath = Candidate.Fuel->ClassPath;
 		OutResult.SelectedFuelDisplayName = Candidate.Fuel->DisplayName;
 		OutResult.SelectedFuelForm = Candidate.Fuel->Form;
-		OutResult.GeneratorPowerMW = Candidate.Generator->PowerProductionMW;
-		OutResult.GrossPowerMW = GrossPowerMW;
-		OutResult.EquivalentGeneratorCount = GrossPowerMW / Candidate.Generator->PowerProductionMW;
-		OutResult.BuiltGeneratorCount = FMath::Max(
-			1,
-			FMath::CeilToInt(OutResult.EquivalentGeneratorCount));
+		OutResult.GeneratorBasePowerMW = Candidate.Generator->PowerProductionMW;
+		const double GeneratorClockFactor = Request.GeneratorClockPercent / 100.0;
+		OutResult.GeneratorPowerMW = Candidate.Generator->PowerProductionMW * GeneratorClockFactor;
+		OutResult.GrossPowerMW = Augmentation.GrossPower;
+		OutResult.EquivalentGeneratorCount = GeneratorGrossPowerMW / Candidate.Generator->PowerProductionMW;
+		OutResult.FullClockGeneratorCount = FMath::Max(
+			0,
+			FMath::FloorToInt((OutResult.EquivalentGeneratorCount + KINDA_SMALL_NUMBER) / GeneratorClockFactor));
+		const double RemainingEquivalentGenerators = FMath::Max(
+			0.0,
+			OutResult.EquivalentGeneratorCount
+				- static_cast<double>(OutResult.FullClockGeneratorCount) * GeneratorClockFactor);
+		OutResult.PartialGeneratorClockPercent = RemainingEquivalentGenerators * 100.0;
+		OutResult.BuiltGeneratorCount = OutResult.FullClockGeneratorCount
+			+ (OutResult.PartialGeneratorClockPercent > 0.05 ? 1 : 0);
 
 		if (Candidate.Fuel->bFuelFree)
 		{
@@ -4323,7 +5301,7 @@ FSFPPlanResult FSFPPlannerSolver::SolvePower(const FSFPPowerPlanRequest& Request
 		}
 		else
 		{
-			double RawFuelRatePerMinute = GrossPowerMW * 60.0
+			double RawFuelRatePerMinute = GeneratorGrossPowerMW * 60.0
 				/ Candidate.Fuel->EnergyValueMJ;
 			const bool bFluidFuel = Candidate.Fuel->Form == TEXT("liquid")
 				|| Candidate.Fuel->Form == TEXT("gas");
@@ -4347,6 +5325,7 @@ FSFPPlanResult FSFPPlannerSolver::SolvePower(const FSFPPowerPlanRequest& Request
 		FSolveContext Context;
 		Context.bOnlyAvailableRecipes = Request.bOnlyAvailable;
 		Context.RecipeOverrides = Request.RecipeOverrides;
+		Context.MachineSettings = Request.MachineSettings;
 		Context.Result = OutResult;
 
 		FSFPPlanNode TargetNode;
@@ -4369,12 +5348,44 @@ FSFPPlanResult FSFPPlannerSolver::SolvePower(const FSFPPowerPlanRequest& Request
 		GeneratorNode.Title = Candidate.Generator->DisplayName;
 		GeneratorNode.ClassPath = Candidate.Generator->ClassPath;
 		GeneratorNode.ProducedItemClassPath = TEXT("SFP.ElectricPower");
-		GeneratorNode.RatePerMinute = GrossPowerMW;
+		GeneratorNode.RatePerMinute = GeneratorGrossPowerMW;
 		GeneratorNode.MachineCount = Context.Result.EquivalentGeneratorCount;
-		GeneratorNode.PowerMW = GrossPowerMW;
+		GeneratorNode.BuiltMachineCount = Context.Result.BuiltGeneratorCount;
+		GeneratorNode.FullClockMachineCount = Context.Result.FullClockGeneratorCount;
+		GeneratorNode.ConfiguredClockPercent = Context.Result.ConfiguredGeneratorClockPercent;
+		GeneratorNode.PartialClockPercent = Context.Result.PartialGeneratorClockPercent;
+		GeneratorNode.PowerMW = GeneratorGrossPowerMW;
 		Context.Result.Nodes.Add(MoveTemp(GeneratorNode));
 		Context.Result.TotalEquivalentMachines += Context.Result.EquivalentGeneratorCount;
 		Context.Result.MaxDepth = 1;
+
+		int32 AlienPowerAugmenterNodeId = INDEX_NONE;
+		const int32 AlienPowerAugmenterCount = Context.Result.PassiveAlienPowerAugmenters
+			+ Context.Result.FueledAlienPowerAugmenters;
+		if (AlienPowerAugmenterCount > 0)
+		{
+			FSFPPlanNode AugmenterNode;
+			AugmenterNode.Id = Context.Result.Nodes.Num();
+			AugmenterNode.Type = ESFPPlanNodeType::Generator;
+			AugmenterNode.Depth = 1;
+			AugmenterNode.Title = AlienPowerAugmenter.DisplayName.IsEmpty()
+				? TEXT("Alien Power Augmenter") : AlienPowerAugmenter.DisplayName;
+			AugmenterNode.ClassPath = AlienPowerAugmenter.ClassPath;
+			AugmenterNode.ProducedItemClassPath = TEXT("SFP.AlienAugmentedPower");
+			AugmenterNode.RatePerMinute = Context.Result.AlienPowerContributionMW;
+			AugmenterNode.MachineCount = static_cast<double>(AlienPowerAugmenterCount);
+			AugmenterNode.BuiltMachineCount = AlienPowerAugmenterCount;
+			AugmenterNode.PowerMW = Context.Result.AlienPowerContributionMW;
+			AugmenterNode.Detail = FString::Printf(
+				TEXT("%d passiv + %d mit Matrix\n%s MW Basis je Gebäude | Netzfaktor ×%s\nBeitrag zur Bruttoerzeugung: %s MW"),
+				Context.Result.PassiveAlienPowerAugmenters,
+				Context.Result.FueledAlienPowerAugmenters,
+				*FSFPNumberFormatting::Decimal(AlienPowerAugmenter.BasePowerPerAugmenterMW, 1),
+				*FSFPNumberFormatting::Decimal(Context.Result.AlienPowerMultiplier, 3),
+				*FSFPNumberFormatting::Decimal(Context.Result.AlienPowerContributionMW, 2));
+			AlienPowerAugmenterNodeId = Context.Result.Nodes.Add(MoveTemp(AugmenterNode));
+			Context.Result.TotalEquivalentMachines += AlienPowerAugmenterCount;
+		}
 
 		int32 WasteSourceNodeId = 1;
 		auto AddPowerComponentNode = [this, &Context](
@@ -4714,6 +5725,20 @@ FSFPPlanResult FSFPPlannerSolver::SolvePower(const FSFPPowerPlanRequest& Request
 			}
 		}
 
+		if (Context.Result.AlienPowerMatrixRatePerMinute > KINDA_SMALL_NUMBER
+			&& AlienPowerAugmenterNodeId != INDEX_NONE
+			&& IsValid(AlienPowerAugmenter.MatrixItemClass.Get()))
+		{
+			BuildDemand(
+				AlienPowerAugmenter.MatrixItemClass.Get(),
+				AlienPowerAugmenter.MatrixDisplayName.IsEmpty() ? TEXT("Alien Power Matrix") : AlienPowerAugmenter.MatrixDisplayName,
+				AlienPowerAugmenter.MatrixForm.IsEmpty() ? TEXT("solid") : AlienPowerAugmenter.MatrixForm,
+				Context.Result.AlienPowerMatrixRatePerMinute,
+				AlienPowerAugmenterNodeId,
+				2,
+				Context);
+		}
+
 		if (IsValid(Candidate.Fuel->WasteItemClass.Get())
 			&& Context.Result.WasteRatePerMinute > KINDA_SMALL_NUMBER)
 		{
@@ -4754,28 +5779,25 @@ FSFPPlanResult FSFPPlannerSolver::SolvePower(const FSFPPowerPlanRequest& Request
 			0.0,
 			Context.Result.NetPowerMW - Context.Result.RequestedNetPowerMW);
 
-		const int32 FullyClockedGenerators = FMath::FloorToInt(
-			Context.Result.EquivalentGeneratorCount + KINDA_SMALL_NUMBER);
-		const double PartialClockPercent = FMath::Max(
-			0.0,
-			(Context.Result.EquivalentGeneratorCount - FullyClockedGenerators) * 100.0);
 		FString ClockingText;
-		if (PartialClockPercent > 0.05)
+		if (Context.Result.PartialGeneratorClockPercent > 0.05)
 		{
-			ClockingText = FullyClockedGenerators > 0
+			ClockingText = Context.Result.FullClockGeneratorCount > 0
 				? FString::Printf(
-					TEXT("%d × 100%% + 1 × %s%%"),
-					FullyClockedGenerators,
-					*FSFPNumberFormatting::Decimal(PartialClockPercent, 1))
+					TEXT("%d × %s%% + 1 × %s%%"),
+					Context.Result.FullClockGeneratorCount,
+					*FSFPNumberFormatting::Decimal(Context.Result.ConfiguredGeneratorClockPercent, 1),
+					*FSFPNumberFormatting::Decimal(Context.Result.PartialGeneratorClockPercent, 1))
 				: FString::Printf(
 					TEXT("1 × %s%%"),
-					*FSFPNumberFormatting::Decimal(PartialClockPercent, 1));
+					*FSFPNumberFormatting::Decimal(Context.Result.PartialGeneratorClockPercent, 1));
 		}
 		else
 		{
 			ClockingText = FString::Printf(
-				TEXT("%d × 100%%"),
-				Context.Result.BuiltGeneratorCount);
+				TEXT("%d × %s%%"),
+				Context.Result.BuiltGeneratorCount,
+				*FSFPNumberFormatting::Decimal(Context.Result.ConfiguredGeneratorClockPercent, 1));
 		}
 		const FString GenerationQualifier = Candidate.Generator->bVariableOutput
 			? TEXT(" maximal") : FString();
@@ -4783,11 +5805,15 @@ FSFPPlanResult FSFPPlannerSolver::SolvePower(const FSFPPowerPlanRequest& Request
 			? FString()
 			: FString::Printf(TEXT(" | %s"), *Candidate.Generator->ConfigurationDetail);
 		Context.Result.Nodes[1].Detail = FString::Printf(
-			TEXT("%s%s\n%d Generatoren gebaut | %s\n%s MW%s brutto | %s MW%s netto"),
+			TEXT("%s%s\n%d Generatoren gebaut | %s\n%s MW je Generator bei %s%% | %s MW%s Generatorbasis\n%s MW%s gesamt brutto | %s MW%s netto"),
 			*Candidate.Fuel->DisplayName,
 			*ConfigurationSuffix,
 			Context.Result.BuiltGeneratorCount,
 			*ClockingText,
+			*FSFPNumberFormatting::Decimal(Context.Result.GeneratorPowerMW, 2),
+			*FSFPNumberFormatting::Decimal(Context.Result.ConfiguredGeneratorClockPercent, 1),
+			*FSFPNumberFormatting::Decimal(Context.Result.BaseGeneratorGrossPowerMW, 2),
+			*GenerationQualifier,
 			*FSFPNumberFormatting::Decimal(Context.Result.GrossPowerMW, 2),
 			*GenerationQualifier,
 			*FSFPNumberFormatting::Decimal(Context.Result.NetPowerMW, 2),
@@ -4798,6 +5824,27 @@ FSFPPlanResult FSFPPlannerSolver::SolvePower(const FSFPPowerPlanRequest& Request
 				TEXT("%s: Planung verwendet die wetter-/standortabhängige Maximalleistung von %s MW je Generator"),
 				*Candidate.Generator->DisplayName,
 				*FSFPNumberFormatting::Decimal(Candidate.Generator->PowerProductionMW, 2)));
+		}
+
+		if (AlienPowerAugmenterNodeId != INDEX_NONE
+			&& Context.Result.AlienPowerContributionMW > KINDA_SMALL_NUMBER)
+		{
+			FSFPPlanEdge AugmenterEdge;
+			AugmenterEdge.SourceNodeId = AlienPowerAugmenterNodeId;
+			// Feed the local generator/grid aggregation node. The final edge from node 1
+			// to the target already carries the complete augmented net output.
+			AugmenterEdge.TargetNodeId = 1;
+			AugmenterEdge.ItemName = TEXT("Alien-verstärkte Leistung");
+			AugmenterEdge.ItemClassPath = TEXT("SFP.AlienAugmentedPower");
+			AugmenterEdge.Form = TEXT("power");
+			AugmenterEdge.RatePerMinute = Context.Result.AlienPowerContributionMW;
+			AugmenterEdge.TransportKind = TEXT("power");
+			AugmenterEdge.TransportLabel = FString::Printf(
+				TEXT("Alien Power Augmenter: +%s MW | ×%s"),
+				*FSFPNumberFormatting::Decimal(Context.Result.AlienPowerContributionMW, 2),
+				*FSFPNumberFormatting::Decimal(Context.Result.AlienPowerMultiplier, 3));
+			AugmenterEdge.bLocalRoutingLink = true;
+			Context.Result.Edges.Add(MoveTemp(AugmenterEdge));
 		}
 
 		FSFPPlanEdge PowerEdge;
@@ -4832,27 +5879,61 @@ FSFPPlanResult FSFPPlannerSolver::SolvePower(const FSFPPowerPlanRequest& Request
 	const bool bPreferStableAutomaticChoice = Request.GeneratorClassPath.IsEmpty();
 	for (const FPowerCandidate& Candidate : Candidates)
 	{
-		FSFPPlanResult ProbePlan;
-		if (!BuildCandidate(Candidate, RequiredNetWithReserve, ProbePlan))
+		double GeneratorGrossPowerMW = SFPVariablePower::GeneratorGrossForTarget(
+			RequiredNetWithReserve,
+			Request.PassiveAlienPowerAugmenters,
+			Request.FueledAlienPowerAugmenters,
+			AlienPowerAugmenter.BasePowerPerAugmenterMW,
+			AlienPowerAugmenter.PassiveBoostPerAugmenter,
+			AlienPowerAugmenter.FueledBoostPerAugmenter);
+
+		FSFPPlanResult FinalPlan;
+		bool bConverged = false;
+		for (int32 Iteration = 0; Iteration < 12; ++Iteration)
 		{
-			continue;
-		}
-		const double SelfUseRatio = ProbePlan.SelfConsumptionPowerMW
-			/ FMath::Max(ProbePlan.GrossPowerMW, KINDA_SMALL_NUMBER);
-		if (!FMath::IsFinite(SelfUseRatio) || SelfUseRatio >= 0.95)
-		{
-			continue;
+			FSFPPlanResult ProbePlan;
+			if (!BuildCandidate(Candidate, GeneratorGrossPowerMW, ProbePlan))
+			{
+				break;
+			}
+			const double RequiredTotalGross = RequiredNetWithReserve + ProbePlan.SelfConsumptionPowerMW;
+			const double NextGeneratorGross = SFPVariablePower::GeneratorGrossForTarget(
+				RequiredTotalGross,
+				Request.PassiveAlienPowerAugmenters,
+				Request.FueledAlienPowerAugmenters,
+				AlienPowerAugmenter.BasePowerPerAugmenterMW,
+				AlienPowerAugmenter.PassiveBoostPerAugmenter,
+				AlienPowerAugmenter.FueledBoostPerAugmenter);
+			FinalPlan = MoveTemp(ProbePlan);
+			if (FMath::Abs(NextGeneratorGross - GeneratorGrossPowerMW) <= 0.005)
+			{
+				bConverged = true;
+				break;
+			}
+			GeneratorGrossPowerMW = NextGeneratorGross;
 		}
 
-		const double RequiredGrossPowerMW = RequiredNetWithReserve / (1.0 - SelfUseRatio);
-		FSFPPlanResult FinalPlan;
-		if (!BuildCandidate(Candidate, RequiredGrossPowerMW, FinalPlan))
+		if (!bConverged)
 		{
-			continue;
+			if (!BuildCandidate(Candidate, GeneratorGrossPowerMW, FinalPlan))
+			{
+				continue;
+			}
 		}
 		if (FinalPlan.NetPowerMW + 0.01 < RequiredNetWithReserve)
 		{
-			continue;
+			const double CorrectedGeneratorGross = SFPVariablePower::GeneratorGrossForTarget(
+				RequiredNetWithReserve + FinalPlan.SelfConsumptionPowerMW + 0.02,
+				Request.PassiveAlienPowerAugmenters,
+				Request.FueledAlienPowerAugmenters,
+				AlienPowerAugmenter.BasePowerPerAugmenterMW,
+				AlienPowerAugmenter.PassiveBoostPerAugmenter,
+				AlienPowerAugmenter.FueledBoostPerAugmenter);
+			if (!BuildCandidate(Candidate, CorrectedGeneratorGross, FinalPlan)
+				|| FinalPlan.NetPowerMW + 0.01 < RequiredNetWithReserve)
+			{
+				continue;
+			}
 		}
 
 		const bool bSameOutputStability = !bPreferStableAutomaticChoice

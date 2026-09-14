@@ -25,10 +25,13 @@ struct FSFPInputBudgetOption
 
 struct FSFPRecipeChoiceRow
 {
+	int32 PlanNodeId = INDEX_NONE;
 	FString ItemName;
 	FString ItemClassPath;
 	TArray<TSharedPtr<FSFPRecipeOption>> Options;
 	TSharedPtr<FSFPRecipeOption> Selected;
+	/** Immediate raw-extraction inputs rendered inside this processing card. */
+	TArray<TSharedPtr<FSFPRecipeChoiceRow>> GroupedRawExtractions;
 };
 
 struct FSFPSelectedTarget
@@ -144,6 +147,14 @@ private:
 	void HandlePowerTargetNetMWChanged(double NewValue);
 	TOptional<double> GetPowerReservePercent() const;
 	void HandlePowerReservePercentChanged(double NewValue);
+	TOptional<double> GetPowerGeneratorClockPercent() const;
+	TOptional<double> GetPowerGeneratorMinClockPercent() const;
+	TOptional<double> GetPowerGeneratorMaxClockPercent() const;
+	void HandlePowerGeneratorClockPercentChanged(double NewValue);
+	TOptional<int32> GetPassiveAlienPowerAugmenters() const;
+	void HandlePassiveAlienPowerAugmentersChanged(int32 NewValue);
+	TOptional<int32> GetFueledAlienPowerAugmenters() const;
+	void HandleFueledAlienPowerAugmentersChanged(int32 NewValue);
 	TOptional<double> GetEstimatedConnectionLength() const;
 	void HandleEstimatedConnectionLengthChanged(double NewValue);
 	ECheckBoxState GetOnlyAvailableState() const;
@@ -198,6 +209,7 @@ private:
 	TSharedPtr<SComboBox<TSharedPtr<FSFPPowerGeneratorOption>>> PowerGeneratorCombo;
 	TSharedPtr<SComboBox<TSharedPtr<FSFPPowerFuelOption>>> PowerFuelCombo;
 	TMap<FString, FString> RecipeOverrides;
+	TMap<FString, FSFPMachinePlanSettings> MachineSettingsOverrides;
 	TArray<TSharedPtr<FSFPSavedPlanInfo>> SavedPlans;
 	TSharedPtr<FSFPSavedPlanInfo> SelectedSavedPlan;
 	TSharedPtr<SComboBox<TSharedPtr<FSFPSavedPlanInfo>>> SavedPlanCombo;
@@ -217,6 +229,9 @@ private:
 	double TargetRate = 60.0;
 	double PowerTargetNetMW = 1000.0;
 	double PowerReservePercent = 10.0;
+	double PowerGeneratorClockPercent = 100.0;
+	int32 PassiveAlienPowerAugmenters = 0;
+	int32 FueledAlienPowerAugmenters = 0;
 	double EstimatedConnectionLengthMeters = 10.0;
 	bool bOnlyAvailable = true;
 	bool bCapturingPlannerHotkey = false;

@@ -26,6 +26,43 @@ struct FSFPPlannerItemRate
 	double RatePerMinute = 0.0;
 };
 
+struct FSFPPlannerFuelOption
+{
+	TSubclassOf<UFGItemDescriptor> ItemClass;
+	FString ClassPath;
+	FString DisplayName;
+	FString Form;
+	FString SourceMount;
+	double EnergyValueMJ = 0.0;
+};
+
+/** Runtime capabilities read from the concrete production-machine class. */
+struct FSFPMachineRuntimeConfig
+{
+	bool bCanChangePotential = false;
+	double MinPotential = 1.0;
+	double MaxPotential = 1.0;
+	bool bRuntimeMaxPotentialKnown = false;
+	bool bCanChangeProductionBoost = false;
+	double BaseProductionBoost = 1.0;
+	double MaxProductionBoost = 1.0;
+	double ProductionBoostPerSloop = 0.0;
+	double ProductionBoostPowerExponent = 1.0;
+	int32 MaxSomersloops = 0;
+	bool bRuntimeMaxProductionBoostKnown = false;
+};
+
+/** User-selected operating point for one recipe/machine variant. */
+struct FSFPMachinePlanSettings
+{
+	/** Maximum clock used by the solver for this branch. 100 means vanilla baseline speed. */
+	double ClockPercent = 100.0;
+	/** Somersloops installed per physical machine. */
+	int32 SomersloopCount = 0;
+	/** Optional burner fuel selection. Empty means deterministic automatic selection. */
+	FString FuelClassPath;
+};
+
 struct FSFPPlannerRecipe
 {
 	TSubclassOf<UFGRecipe> RecipeClass;
@@ -41,6 +78,11 @@ struct FSFPPlannerRecipe
 	FString MachineName;
 	double BasePowerMW = 0.0;
 	double PowerExponent = 1.0;
+	FSFPMachineRuntimeConfig MachineConfig;
+	/** True when the production machine burns fuel instead of drawing grid power. */
+	bool bFuelPowered = false;
+	/** Runtime-discovered fuel descriptors for optional burner manufacturers. */
+	TArray<FSFPPlannerFuelOption> FuelOptions;
 	bool bVariablePower = false;
 	/** Optional buildables that are part of one logical machine, e.g. modular-miner attachments. */
 	TArray<FString> AdditionalBuildableClassPaths;
@@ -82,6 +124,10 @@ struct FSFPRecipeOption
 	FString RecipeClassPath;
 	FString DisplayName;
 	FString MachineName;
+	FString MachineClassPath;
+	FSFPMachineRuntimeConfig MachineConfig;
+	bool bFuelPowered = false;
+	TArray<FSFPPlannerFuelOption> FuelOptions;
 	FString SourceMount;
 	bool bAvailable = false;
 };
@@ -177,6 +223,11 @@ struct FSFPPowerGeneratorOption
 	FString SourceMount;
 	bool bAvailable = false;
 	double PowerProductionMW = 0.0;
+	/** Generator potential/clock support. Generators never use Somersloops. */
+	bool bCanChangePotential = false;
+	double MinPotential = 0.01;
+	double MaxPotential = 1.0;
+	bool bRuntimeMaxPotentialKnown = false;
 	TSubclassOf<UFGItemDescriptor> SupplementalItemClass;
 	FString SupplementalItemClassPath;
 	FString SupplementalDisplayName;
@@ -199,6 +250,27 @@ struct FSFPPowerGeneratorOption
 	TArray<FSFPPowerFuelOption> Fuels;
 };
 
+/** Runtime-discovered Alien Power Augmenter parameters. */
+struct FSFPAlienPowerAugmenterOption
+{
+	UClass* BuildableClass = nullptr;
+	FString ClassPath;
+	FString DisplayName;
+	bool bAvailable = false;
+	/** Independent base generation contributed by each augmenter before grid multiplication. */
+	double BasePowerPerAugmenterMW = 500.0;
+	/** Grid-production multiplier contribution of one unfueled augmenter (0.10 = +10%). */
+	double PassiveBoostPerAugmenter = 0.10;
+	/** Grid-production multiplier contribution of one Matrix-fed augmenter (0.30 = +30%). */
+	double FueledBoostPerAugmenter = 0.30;
+	TSubclassOf<UFGItemDescriptor> MatrixItemClass;
+	FString MatrixItemClassPath;
+	FString MatrixDisplayName;
+	FString MatrixForm;
+	/** Alien Power Matrix consumption for one fueled augmenter. */
+	double MatrixRatePerMinute = 5.0;
+};
+
 /** User selections for a net-power production plan. Empty class paths mean automatic selection. */
 struct FSFPPowerPlanRequest
 {
@@ -207,7 +279,14 @@ struct FSFPPowerPlanRequest
 	bool bOnlyAvailable = true;
 	FString GeneratorClassPath;
 	FString FuelClassPath;
+	/** Maximum generator clock used for the selected power setup. */
+	double GeneratorClockPercent = 100.0;
+	/** Alien Power Augmenters connected without Alien Power Matrix supply. */
+	int32 PassiveAlienPowerAugmenters = 0;
+	/** Alien Power Augmenters continuously supplied with Alien Power Matrix. */
+	int32 FueledAlienPowerAugmenters = 0;
 	TMap<FString, FString> RecipeOverrides;
+	TMap<FString, FSFPMachinePlanSettings> MachineSettings;
 	double EstimatedConnectionLengthMeters = 10.0;
 	FString SelectedConveyorClassPath;
 	FString SelectedConveyorLiftClassPath;
@@ -234,8 +313,26 @@ struct FSFPPlanNode
 	FString ProducedItemClassPath;
 	FString RecipeClassPath;
 	double RatePerMinute = 0.0;
+	/** 100%-clock cycle-equivalent machine count after production amplification. */
 	double MachineCount = 0.0;
+	/** Physical machines that must actually be built for the configured clock limit. */
+	int32 BuiltMachineCount = 0;
+	/** Number of machines running at the configured clock limit. */
+	int32 FullClockMachineCount = 0;
+	/** Configured maximum clock for this machine group. */
+	double ConfiguredClockPercent = 100.0;
+	/** Clock of the final partially-loaded machine, or 0 when none is needed. */
+	double PartialClockPercent = 0.0;
+	int32 SomersloopCount = 0;
+	double ProductionBoost = 1.0;
 	double PowerMW = 0.0;
+	/** This node uses PowerMW as burner heat demand and must not count toward grid power. */
+	bool bFuelPowered = false;
+	FString FuelClassPath;
+	FString FuelDisplayName;
+	FString FuelForm;
+	double FuelEnergyValueMJ = 0.0;
+	double FuelRatePerMinute = 0.0;
 	int32 InfrastructureCount = 0;
 	/** Buildable attachments whose construction costs scale with the whole machine count. */
 	TArray<FString> AdditionalBuildableClassPaths;
@@ -293,9 +390,25 @@ struct FSFPPlanResult
 	FString SelectedFuelClassPath;
 	FString SelectedFuelDisplayName;
 	FString SelectedFuelForm;
+	/** Base output of one generator at 100% clock. */
+	double GeneratorBasePowerMW = 0.0;
+	/** Output of one fully configured generator at ConfiguredGeneratorClockPercent. */
 	double GeneratorPowerMW = 0.0;
 	double EquivalentGeneratorCount = 0.0;
 	int32 BuiltGeneratorCount = 0;
+	int32 FullClockGeneratorCount = 0;
+	double ConfiguredGeneratorClockPercent = 100.0;
+	double PartialGeneratorClockPercent = 0.0;
+	/** Generator output before Alien Power Augmenter base production / multiplication. */
+	double BaseGeneratorGrossPowerMW = 0.0;
+	int32 PassiveAlienPowerAugmenters = 0;
+	int32 FueledAlienPowerAugmenters = 0;
+	double AlienPowerAugmenterBaseMW = 0.0;
+	double AlienPowerMultiplier = 1.0;
+	double AlienPowerContributionMW = 0.0;
+	FString AlienPowerMatrixItemClassPath;
+	FString AlienPowerMatrixDisplayName;
+	double AlienPowerMatrixRatePerMinute = 0.0;
 	double GrossPowerMW = 0.0;
 	double SelfConsumptionPowerMW = 0.0;
 	double NetPowerMW = 0.0;
@@ -316,6 +429,8 @@ struct FSFPPlanResult
 	TArray<FSFPConstructionCost> InfrastructureConstructionCosts;
 	TArray<FSFPConstructionCost> ConstructionCosts;
 	TMap<FString, FString> RecipeOverrides;
+	/** Recipe/machine operating settings, keyed by the selected runtime recipe-variant path. */
+	TMap<FString, FSFPMachinePlanSettings> MachineSettings;
 	TMap<FString, double> AvailableInputRates;
 	bool bOnlyAvailableRecipes = true;
 	FString SelectedConveyorClassPath;
