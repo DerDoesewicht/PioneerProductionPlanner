@@ -48,6 +48,8 @@ public:
 		const FString& FileName,
 		int64 ExpectedRevision,
 		FString& OutError);
+	/** Requests live resource-node totals and occupancy from the authoritative world. */
+	static bool RequestResourceNodeInventory(AFGPlayerController* PlayerController, FString& OutError);
 
 	UFUNCTION(Client, Reliable)
 	void ClientOpenPlanner();
@@ -90,6 +92,9 @@ public:
 	UFUNCTION(Server, Reliable)
 	void ServerDeleteSharedPlan(const FString& FileName, int64 ExpectedRevision);
 
+	UFUNCTION(Server, Reliable)
+	void ServerRequestResourceNodeInventory();
+
 	UFUNCTION(Client, Reliable)
 	void ClientReceiveSharedPlanCatalog(const TArray<FSFPSharedPlanSummary>& Plans, const FString& Error);
 
@@ -127,6 +132,9 @@ public:
 		const FString& FileName,
 		const FString& PlanName,
 		const FString& Error);
+
+	UFUNCTION(Client, Reliable)
+	void ClientReceiveResourceNodeInventory(const FString& InventoryJson, const FString& Error);
 
 	UFUNCTION(Client, Reliable)
 	void ClientSharedPlanChanged(const FSFPSharedPlanSummary& Summary);

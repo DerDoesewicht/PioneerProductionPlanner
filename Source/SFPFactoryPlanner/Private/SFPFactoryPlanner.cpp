@@ -119,7 +119,7 @@ void FSFPFactoryPlannerModule::StartupModule()
 		UE_LOG(
 			LogSFPFactoryPlanner,
 			Display,
-			TEXT("Pioneer Production Planner 1.4.1 loaded on dedicated server; client-only Slate input disabled"));
+			TEXT("Pioneer Production Planner 1.5.1 loaded on dedicated server; client-only Slate input disabled"));
 		return;
 	}
 
@@ -138,7 +138,7 @@ void FSFPFactoryPlannerModule::StartupModule()
 	UE_LOG(
 		LogSFPFactoryPlanner,
 		Display,
-		TEXT("Pioneer Production Planner 1.4.1 loaded; hotkey: %s"),
+		TEXT("Pioneer Production Planner 1.5.1 loaded; hotkey: %s"),
 		HotkeyName.IsEmpty() ? TEXT("disabled") : *HotkeyName);
 }
 

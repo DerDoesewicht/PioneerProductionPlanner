@@ -4,6 +4,7 @@
 #include "SFPLocalization.h"
 #include "SFPPlannerHotkey.h"
 #include "SFPPlannerPersistence.h"
+#include "SFPResourceNodeInventory.h"
 #include "SFPPlannerUI.h"
 
 #include "Engine/Engine.h"
@@ -516,6 +517,36 @@ bool USFPPlannerRemoteCallObject::RequestSharedPlanDelete(
 	return true;
 }
 
+bool USFPPlannerRemoteCallObject::RequestResourceNodeInventory(
+	AFGPlayerController* PlayerController,
+	FString& OutError)
+{
+	// Single-player/listen-server worlds can be scanned synchronously. Dedicated
+	// clients ask the authoritative server so unloaded or non-replicated actors
+	// cannot make their free-node count smaller than the save actually contains.
+	if (IsValid(PlayerController) && PlayerController->IsLocalController()
+		&& PlayerController->HasAuthority())
+	{
+		TMap<FString, FSFPResourceNodeAvailability> Availability;
+		if (!SFPResourceNodeInventory::Scan(PlayerController->GetWorld(), Availability, OutError))
+		{
+			return false;
+		}
+		FSFPPlannerUI::ReceiveResourceNodeInventory(
+			PlayerController,
+			SFPResourceNodeInventory::ToJson(Availability),
+			FString());
+		return true;
+	}
+	USFPPlannerRemoteCallObject* RemoteCallObject = ResolveForLocalPlayer(PlayerController, OutError);
+	if (!IsValid(RemoteCallObject))
+	{
+		return false;
+	}
+	RemoteCallObject->ServerRequestResourceNodeInventory();
+	return true;
+}
+
 void USFPPlannerRemoteCallObject::ClientOpenPlanner_Implementation()
 {
 	AFGPlayerController* PlayerController = ResolveOwningLocalPlayer();
@@ -839,6 +870,24 @@ void USFPPlannerRemoteCallObject::ServerDeleteSharedPlan_Implementation(
 		*RequesterName);
 }
 
+void USFPPlannerRemoteCallObject::ServerRequestResourceNodeInventory_Implementation()
+{
+	AFGPlayerController* Requester = ResolveOwningPlayer();
+	if (!IsValid(Requester) || !Requester->HasAuthority())
+	{
+		ClientReceiveResourceNodeInventory(FString(), TEXT("Server-Autorität für die Rohstoffinventur fehlt"));
+		return;
+	}
+	TMap<FString, FSFPResourceNodeAvailability> Availability;
+	FString Error;
+	if (!SFPResourceNodeInventory::Scan(GetWorld(), Availability, Error))
+	{
+		ClientReceiveResourceNodeInventory(FString(), Error);
+		return;
+	}
+	ClientReceiveResourceNodeInventory(SFPResourceNodeInventory::ToJson(Availability), FString());
+}
+
 void USFPPlannerRemoteCallObject::ClientReceiveSharedPlanCatalog_Implementation(
 	const TArray<FSFPSharedPlanSummary>& Plans,
 	const FString& Error)
@@ -981,6 +1030,16 @@ void USFPPlannerRemoteCallObject::ClientReceiveSharedPlanDeleteResult_Implementa
 			FileName,
 			PlanName,
 			Error);
+	}
+}
+
+void USFPPlannerRemoteCallObject::ClientReceiveResourceNodeInventory_Implementation(
+	const FString& InventoryJson,
+	const FString& Error)
+{
+	if (AFGPlayerController* PlayerController = ResolveOwningLocalPlayer(); IsValid(PlayerController))
+	{
+		FSFPPlannerUI::ReceiveResourceNodeInventory(PlayerController, InventoryJson, Error);
 	}
 }
 

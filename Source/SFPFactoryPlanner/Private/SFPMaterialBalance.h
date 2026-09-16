@@ -98,20 +98,51 @@ inline bool Solve(const Matrix& Net, const Vector& Demand, const Vector& Externa
     if (Net.empty() || ExternalCost.empty() || Net.size() != Demand.size()
         || ExternalCost.size() != ActivityCost.size() || Net.size() > 1024 || ExternalCost.size() > 512) return false;
     Matrix A = Net;
-    Vector B = Demand, C = ExternalCost;
-    for (auto& Row : A)
+    Vector B = Demand;
+    for (size_t I = 0; I < A.size(); ++I)
     {
-        if (Row.size() != C.size()) return false;
-        for (double& V : Row) { if (!std::isfinite(V)) return false; V = -V; }
+        auto& Row = A[I];
+        if (Row.size() != ExternalCost.size() || !std::isfinite(B[I])) return false;
+        for (double& V : Row)
+        {
+            if (!std::isfinite(V)) return false;
+            V = -V;
+        }
+        B[I] = -B[I];
     }
-    for (double& V : B) { if (!std::isfinite(V)) return false; V = -V; }
-    for (double& V : C) { if (!std::isfinite(V) || V < 0) return false; V = -V; }
+
+    // Huge power plans combine raw-resource rates in the hundreds of millions
+    // per minute with deliberately expensive external fallback sources.
+    // Normalise objective coefficients so their absolute magnitude cannot
+    // destabilise the tableau; their ordering and optimum remain unchanged.
+    Vector ExternalObjective = ExternalCost;
+    double ExternalScale = 1.0;
+    for (double V : ExternalObjective)
+    {
+        if (!std::isfinite(V) || V < 0) return false;
+        ExternalScale = std::max(ExternalScale, std::abs(V));
+    }
+    for (double& V : ExternalObjective) V /= ExternalScale;
+    Vector C = ExternalObjective;
+    for (double& V : C) V = -V;
     if (!Tableau(A, B, C).Solve(Rates)) return false;
     double Cost = 0;
-    for (size_t J = 0; J < Rates.size(); ++J) Cost += ExternalCost[J] * Rates[J];
-    A.push_back(ExternalCost); B.push_back(Cost + 1e-8 * std::max(1.0, std::abs(Cost)));
+    for (size_t J = 0; J < Rates.size(); ++J) Cost += ExternalObjective[J] * Rates[J];
+    Vector CostRow = ExternalObjective;
+    double CostRowScale = std::max(1.0, std::abs(Cost));
+    for (double V : CostRow) CostRowScale = std::max(CostRowScale, std::abs(V));
+    for (double& V : CostRow) V /= CostRowScale;
+    A.push_back(CostRow);
+    B.push_back((Cost + 1e-8 * std::max(1.0, std::abs(Cost))) / CostRowScale);
+
     C = ActivityCost;
-    for (double& V : C) { if (!std::isfinite(V) || V <= 0) return false; V = -V; }
+    double ActivityScale = 1.0;
+    for (double V : C)
+    {
+        if (!std::isfinite(V) || V <= 0) return false;
+        ActivityScale = std::max(ActivityScale, std::abs(V));
+    }
+    for (double& V : C) V = -V / ActivityScale;
     if (!Tableau(A, B, C).Solve(Rates)) return false;
     for (double& V : Rates)
     {

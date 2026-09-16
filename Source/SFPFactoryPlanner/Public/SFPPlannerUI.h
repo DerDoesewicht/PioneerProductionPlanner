@@ -32,6 +32,10 @@ public:
 		const FString& FileName,
 		const FString& PlanName,
 		const FString& Error);
+	static void ReceiveResourceNodeInventory(
+		AFGPlayerController* PlayerController,
+		const FString& InventoryJson,
+		const FString& Error);
 	static void NotifySharedPlanChanged(
 		AFGPlayerController* PlayerController,
 		const FSFPSharedPlanSummary& Summary);

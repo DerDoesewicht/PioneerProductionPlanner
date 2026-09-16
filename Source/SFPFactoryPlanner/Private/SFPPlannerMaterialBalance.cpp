@@ -68,7 +68,8 @@ bool FSFPPlannerSolver::BalanceMaterials(FSFPPlanResult& Result) const
             {
                 Net[I][*J] += Pair.Value;
                 const auto Type = Result.Nodes[Pair.Key].Type;
-                if (Type == ESFPPlanNodeType::Source || Type == ESFPPlanNodeType::Cycle) External[*J] += Pair.Value;
+                if (Type == ESFPPlanNodeType::Source || Type == ESFPPlanNodeType::Cycle)
+                    External[*J] += Pair.Value * FMath::Max(0.001, Result.Nodes[Pair.Key].SourceCostMultiplier);
             }
             else Demand[I] -= Pair.Value;
         }
@@ -91,6 +92,24 @@ bool FSFPPlannerSolver::BalanceMaterials(FSFPPlanResult& Result) const
                 && Node.ClassPath == Limit.Key) Row[J] = -Node.RatePerMinute;
         }
         Net.push_back(Row); Demand.push_back(-Limit.Value);
+    }
+    // Mixed resource selections impose the configured deposit-count/clock
+    // upper bound. Their deliberately expensive fallback source is therefore
+    // used only after every configured extraction group reaches its limit.
+    for (int32 J = 0; J < N; ++J)
+    {
+        const FSFPPlanNode& Node = Result.Nodes[NodesByVariable[J]];
+        if (Node.Type != ESFPPlanNodeType::Machine || Node.MachineCount <= KINDA_SMALL_NUMBER)
+        {
+            continue;
+        }
+        if (Node.MaximumMachineCount > KINDA_SMALL_NUMBER)
+        {
+            SFPMaterialBalance::Vector Row(N, 0);
+            Row[J] = -Node.MachineCount;
+            Net.push_back(Row);
+            Demand.push_back(-Node.MaximumMachineCount);
+        }
     }
     if (!SFPMaterialBalance::Solve(Net, Demand, External, Activity, Scale))
     {
@@ -244,23 +263,68 @@ bool FSFPPlannerSolver::BalanceMaterials(FSFPPlanResult& Result) const
         if (Node.Type == ESFPPlanNodeType::Machine)
         {
             const FSFPPlannerRecipe* Recipe = Recipes.FindByPredicate([&](const FSFPPlannerRecipe& R) { return R.ClassPath == Node.RecipeClassPath; });
-            if (Recipe->bVariablePower)
+            if (Recipe == nullptr) continue;
+            const double LinearPower = Node.PowerMW;
+            const double ConfiguredClock = FMath::Max(0.001, Node.ConfiguredClockPercent / 100.0);
+            const SFPVariablePower::ConfiguredClocking Clocking = SFPVariablePower::ClockedPowerConfigured(
+                Recipe->BasePowerMW,
+                Node.MachineCount,
+                ConfiguredClock,
+                Recipe->PowerExponent,
+                Node.ProductionBoost,
+                Recipe->MachineConfig.ProductionBoostPowerExponent);
+            Node.PowerMW = Clocking.Power;
+            Node.BuiltMachineCount = FMath::Max(1, Clocking.BuiltMachines);
+            Node.FullClockMachineCount = FMath::Max(0, Clocking.FullClockMachines);
+            Node.PartialClockPercent = FMath::Max(0.0, Clocking.PartialClock * 100.0);
+            if (!Node.bFuelPowered)
             {
-                const double LinearPower = Node.PowerMW;
-                Node.PowerMW = SFPVariablePower::ClockedPower(Recipe->BasePowerMW, Node.MachineCount, Recipe->PowerExponent);
                 Result.TotalBasePowerMW += Node.PowerMW - LinearPower;
             }
-            const int32 Full = FMath::FloorToInt(Node.MachineCount + 1e-7);
-            const double Partial = FMath::Max(0.0, (Node.MachineCount - Full) * 100.0);
-            const int32 Whole = Full + (Node.MachineCount > static_cast<double>(Full) ? 1 : 0);
-            Node.Detail = FString::Printf(TEXT("%s\n%s\n%d Maschinen gebaut | %d × 100%% + %s%%\nStrombedarf bei geplanter Taktung: %s MW"),
-                *Recipe->DisplayName, *Recipe->ConfigurationDetail, Whole, Full,
-                *FSFPNumberFormatting::Decimal(Partial, 2), *FSFPNumberFormatting::Decimal(Node.PowerMW, 2));
+            const FString ClockingText = Node.PartialClockPercent > 0.05
+                ? Node.FullClockMachineCount > 0
+                    ? FString::Printf(TEXT("%d × %s%% + 1 × %s%%"),
+                        Node.FullClockMachineCount,
+                        *FSFPNumberFormatting::Decimal(Node.ConfiguredClockPercent, 1),
+                        *FSFPNumberFormatting::Decimal(Node.PartialClockPercent, 1))
+                    : FString::Printf(TEXT("1 × %s%%"), *FSFPNumberFormatting::Decimal(Node.PartialClockPercent, 1))
+                : FString::Printf(TEXT("%d × %s%%"),
+                    Node.BuiltMachineCount,
+                    *FSFPNumberFormatting::Decimal(Node.ConfiguredClockPercent, 1));
+            const FString LimitLine = Node.MaximumMachineCount > KINDA_SMALL_NUMBER
+                ? FString::Printf(TEXT("\nGemischte Vorkommen: höchstens %s Maschinenäquivalente"),
+                    *FSFPNumberFormatting::Decimal(Node.MaximumMachineCount, 2))
+                : FString();
+            Node.Detail = FString::Printf(TEXT("%s\n%s\n%d Maschinen gebaut | %s%s\n%s bei geplanter Taktung: %s MW"),
+                *Recipe->DisplayName,
+                *Recipe->ConfigurationDetail,
+                Node.BuiltMachineCount,
+                *ClockingText,
+                *LimitLine,
+                Node.bFuelPowered ? TEXT("Brennleistung") : TEXT("Strombedarf"),
+                *FSFPNumberFormatting::Decimal(Node.PowerMW, 2));
         }
         else if (Node.Type == ESFPPlanNodeType::Source || Node.Type == ESFPPlanNodeType::Cycle)
         {
             const bool bRaw = Balanced.ContainsByPredicate([&](const FSFPPlanEdge& E) { return E.SourceNodeId == Node.Id && E.TransportKind == TEXT("resource_node"); });
-            Node.Detail = bRaw
+			int32 UsedSourceCount = 0;
+			if (bRaw && Node.MaximumMachineCount > KINDA_SMALL_NUMBER)
+			{
+				if (const FSFPPlanEdge* RawEdge = Balanced.FindByPredicate([&](const FSFPPlanEdge& Edge)
+				{
+					return Edge.SourceNodeId == Node.Id && Edge.TransportKind == TEXT("resource_node");
+				}))
+				{
+					if (Result.Nodes.IsValidIndex(RawEdge->TargetNodeId))
+						UsedSourceCount = Result.Nodes[RawEdge->TargetNodeId].BuiltMachineCount;
+				}
+			}
+            Node.Detail = bRaw && Node.MaximumMachineCount > KINDA_SMALL_NUMBER
+				? FString::Printf(TEXT("Gemischte Vorkommen: %d von %d genutzt | Rohstoffabbau: %s/min"),
+					UsedSourceCount,
+                    FMath::RoundToInt(Node.MaximumMachineCount),
+                    *FSFPNumberFormatting::Decimal(Node.RatePerMinute))
+                : bRaw
                 ? FString::Printf(TEXT("Rohstoffabbau: %s/min"), *FSFPNumberFormatting::Decimal(Node.RatePerMinute))
                 : FString::Printf(TEXT("Externe Zufuhr erforderlich: %s/min"), *FSFPNumberFormatting::Decimal(Node.RatePerMinute));
         }

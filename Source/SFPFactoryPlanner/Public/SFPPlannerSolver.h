@@ -50,7 +50,8 @@ public:
 		double EstimatedConnectionLengthMeters,
 		const FString& SelectedConveyorClassPath = FString(),
 		const FString& SelectedConveyorLiftClassPath = FString(),
-		const TMap<FString, FSFPMachinePlanSettings>& MachineSettings = TMap<FString, FSFPMachinePlanSettings>()) const;
+		const TMap<FString, FSFPMachinePlanSettings>& MachineSettings = TMap<FString, FSFPMachinePlanSettings>(),
+		const TMap<FString, FSFPResourceSourceMix>& ResourceSourceMixes = TMap<FString, FSFPResourceSourceMix>()) const;
 
 	/** Solves all end products in one shared graph so common intermediate production is merged. */
 	FSFPPlanResult Solve(
@@ -62,7 +63,8 @@ public:
 		const FString& SelectedConveyorLiftClassPath = FString(),
 		const TMap<FString, double>& SuppliedInputs = TMap<FString, double>(),
 		bool bEnforceSupplyLimits = true,
-		const TMap<FString, FSFPMachinePlanSettings>& MachineSettings = TMap<FString, FSFPMachinePlanSettings>()) const;
+		const TMap<FString, FSFPMachinePlanSettings>& MachineSettings = TMap<FString, FSFPMachinePlanSettings>(),
+		const TMap<FString, FSFPResourceSourceMix>& ResourceSourceMixes = TMap<FString, FSFPResourceSourceMix>()) const;
 
 	/** Builds generator, fuel, supplemental-resource and complete upstream production chains. */
 	FSFPPlanResult SolvePower(const FSFPPowerPlanRequest& Request) const;

@@ -111,8 +111,8 @@ TSharedPtr<FSFPPlanResult> SSFPPlannerWindow::SolveAvailableInputs(const TArray<
             if (Target.RatePerMinute > 1e-7) Trial.Add(Target);
         }
         if (Trial.IsEmpty()) { auto P = MakeShared<FSFPPlanResult>(); P->bSuccess = true; return P; }
-        return MakeShared<FSFPPlanResult>(Solver->Solve(Trial, bOnlyAvailable, RecipeOverrides,
-            EstimatedConnectionLengthMeters, SelectedConveyor->Tier.ClassPath, SelectedConveyorLift->Tier.ClassPath, Limits, Enforce, MachineSettingsOverrides));
+		return MakeShared<FSFPPlanResult>(Solver->Solve(Trial, bOnlyAvailable, RecipeOverrides,
+			EstimatedConnectionLengthMeters, SelectedConveyor->Tier.ClassPath, SelectedConveyorLift->Tier.ClassPath, Limits, Enforce, MachineSettingsOverrides, BuildEffectiveResourceSourceMixes()));
     };
     // Capacity planning must be driven by the material that is actually
     // withdrawn from the selected input nodes. The solver also has LP supply
@@ -194,8 +194,9 @@ TSharedPtr<FSFPPlanResult> SSFPPlannerWindow::SolveAvailableInputs(const TArray<
                 SelectedConveyor->Tier.ClassPath,
                 SelectedConveyorLift->Tier.ClassPath,
                 Limits,
-                false,
-                MachineSettingsOverrides));
+				false,
+				MachineSettingsOverrides,
+				BuildEffectiveResourceSourceMixes()));
             if (!Best->bSuccess) return Best;
             Best->bInputFeasible = false;
             Best->ErrorMessage = TEXT("NICHT BEGRENZT: Die gewählten freien Ausgaben verbrauchen keinen der eingetragenen Eingänge. Der Graph zeigt die aktuell gewählten Rezeptketten und ihre externen Quellen. Rezeptwahl prüfen oder einen Eingang wählen, der in diesen Ketten tatsächlich verbraucht wird.");

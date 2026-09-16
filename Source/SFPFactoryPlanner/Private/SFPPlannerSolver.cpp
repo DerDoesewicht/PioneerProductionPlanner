@@ -848,6 +848,11 @@ struct FSFPPlannerSolver::FSolveContext
 	TMap<FString, int32> DirectResourceNodeByKey;
 	TMap<FString, FString> RecipeOverrides;
 	TMap<FString, FSFPMachinePlanSettings> MachineSettings;
+	TMap<FString, FSFPResourceSourceMix> ResourceSourceMixes;
+	TMap<FString, double> MixedSourceUsedRates;
+	TMap<FString, int32> MixedProviderNodeByRecipe;
+	TMap<FString, int32> MixedExternalNodeByItem;
+	bool bDispatchingMixedSource = false;
 	int32 ExpansionCount = 0;
 	bool bOnlyAvailableRecipes = false;
 };
@@ -2770,7 +2775,7 @@ void FSFPPlannerSolver::BuildFluidExtractorCatalog(
 	AFGRecipeManager* RecipeManager,
 	TMap<UClass*, TSharedPtr<FSFPProductOption>>& ProductsByClass)
 {
-	// Water pumps and the KLib bio-water extractor do not expose extraction as
+	// Water pumps, oil extractors and the KLib bio-water extractor do not expose extraction as
 	// UFGRecipe production. Their build recipes only create the building, while
 	// rate, cycle size and supported liquid live on the extractor CDO. Register
 	// one synthetic route per unlocked uniform-rate extractor so the liquid is
@@ -2793,7 +2798,10 @@ void FSFPPlannerSolver::BuildFluidExtractorCatalog(
 		const bool bWaterExtractor = !bBioWaterExtractor
 			&& (IsClassOrParentNamed(BuildableClass, TEXT("FGBuildableWaterPump"))
 				|| BuildablePath.Contains(TEXT("/MiniExtractor/"), ESearchCase::IgnoreCase));
-		if (!IsValid(ExtractorCDO) || (!bWaterExtractor && !bBioWaterExtractor))
+		const bool bOilExtractor = BuildablePath.Contains(TEXT("/OilPump/"), ESearchCase::IgnoreCase)
+			|| BuildablePath.Contains(TEXT("OilExtractor"), ESearchCase::IgnoreCase);
+		if (!IsValid(ExtractorCDO)
+			|| (!bWaterExtractor && !bBioWaterExtractor && !bOilExtractor))
 		{
 			continue;
 		}
@@ -2849,6 +2857,8 @@ void FSFPPlannerSolver::BuildFluidExtractorCatalog(
 		const bool bWaterExtractor = !bBioWaterExtractor
 			&& (IsClassOrParentNamed(Info.BuildableClass, TEXT("FGBuildableWaterPump"))
 				|| Info.ClassPath.Contains(TEXT("/MiniExtractor/"), ESearchCase::IgnoreCase));
+		const bool bOilExtractor = Info.ClassPath.Contains(TEXT("/OilPump/"), ESearchCase::IgnoreCase)
+			|| Info.ClassPath.Contains(TEXT("OilExtractor"), ESearchCase::IgnoreCase);
 		// Base-game and compatible modded water pumps may rely on their placement
 		// resource and leave the optional allow-list empty. The canonical water
 		// descriptor is loaded only for that specific class hierarchy. Other
@@ -2861,6 +2871,16 @@ void FSFPPlannerSolver::BuildFluidExtractorCatalog(
 			if (IsValid(WaterClass))
 			{
 				ResourceClasses.Add(WaterClass);
+			}
+		}
+		if (ResourceClasses.IsEmpty() && bOilExtractor)
+		{
+			UClass* CrudeOilClass = LoadObject<UClass>(
+				nullptr,
+				TEXT("/Game/FactoryGame/Resource/RawResources/CrudeOil/Desc_LiquidOil.Desc_LiquidOil_C"));
+			if (IsValid(CrudeOilClass))
+			{
+				ResourceClasses.Add(CrudeOilClass);
 			}
 		}
 
@@ -2893,63 +2913,88 @@ void FSFPPlannerSolver::BuildFluidExtractorCatalog(
 			}
 
 			const double AmountPerCycle = static_cast<double>(RawAmountPerCycle) / 1000.0;
-			const double RatePerMinute = AmountPerCycle * 60.0 / CycleSeconds;
-			if (RatePerMinute <= KINDA_SMALL_NUMBER)
+			const double BaseRatePerMinute = AmountPerCycle * 60.0 / CycleSeconds;
+			if (BaseRatePerMinute <= KINDA_SMALL_NUMBER)
 			{
 				continue;
 			}
 
-			FSFPPlannerRecipe Recipe;
-			Recipe.ClassPath = FString::Printf(
-				TEXT("SFP.DirectFluidExtractor|%s|%s"),
-				*Info.ClassPath,
-				*ResourceClass->GetPathName());
-			Recipe.SourceMount = SolverSourceMountFromPath(Info.ClassPath);
-			Recipe.bAvailable = Info.bAvailable;
-			Recipe.DurationSeconds = CycleSeconds;
-			Recipe.MachineClass = Info.BuildableClass;
-			Recipe.MachineName = Info.DisplayName;
-			Recipe.BasePowerMW = Info.PowerMW;
-			Recipe.PowerExponent = FMath::Max(0.001, ReflectedNumberValue(
-				ExtractorCDO, Info.BuildableClass, TEXT("mPowerConsumptionExponent"), 1.0));
-			Recipe.MachineConfig = ReadMachineRuntimeConfig(ExtractorCDO, Info.BuildableClass);
-			Recipe.bDirectResourceExtraction = true;
-			Recipe.ResourceNodeLabel = bWaterExtractor
-				? TEXT("Wasserfläche")
-				: TEXT("Flüssigkeitsvorkommen");
-			Recipe.DisplayName = FString::Printf(
-				TEXT("Förderung: %s (%s)"),
-				*ItemDisplayName(ResourceClass),
-				*Info.DisplayName);
-			Recipe.ConfigurationDetail = FString::Printf(
-				TEXT("%s | %s m³/min pro Extraktor"),
-				*Recipe.ResourceNodeLabel,
-				*FSFPNumberFormatting::Decimal(RatePerMinute));
-
-			FSFPPlannerItemRate Resource;
-			Resource.ItemClass = ResourceDescriptor;
-			Resource.ClassPath = ResourceClass->GetPathName();
-			Resource.DisplayName = ItemDisplayName(ResourceClass);
-			Resource.Form = SolverResourceFormToString(Form);
-			Resource.RatePerMinute = RatePerMinute;
-			Recipe.Ingredients.Add(Resource);
-			Recipe.Products.Add(Resource);
-
-			const int32 RecipeIndex = Recipes.Add(MoveTemp(Recipe));
-			RecipesByProduct.FindOrAdd(ResourceClass).Add(RecipeIndex);
-
-			TSharedPtr<FSFPProductOption>& Option = ProductsByClass.FindOrAdd(ResourceClass);
-			if (!Option.IsValid())
+			static const TCHAR* PurityNames[] = {TEXT("Unrein"), TEXT("Normal"), TEXT("Rein")};
+			static const double PurityMultipliers[] = {0.5, 1.0, 2.0};
+			const int32 RouteCount = bOilExtractor ? 3 : 1;
+			for (int32 RouteIndex = 0; RouteIndex < RouteCount; ++RouteIndex)
 			{
-				Option = MakeShared<FSFPProductOption>();
-				Option->ItemClass = ResourceDescriptor;
-				Option->ClassPath = ResourceClass->GetPathName();
-				Option->DisplayName = Resource.DisplayName;
-				Option->Form = Resource.Form;
-				Option->SourceMount = SolverSourceMountFromPath(Option->ClassPath);
+				const double RatePerMinute = BaseRatePerMinute
+					* (bOilExtractor ? PurityMultipliers[RouteIndex] : 1.0);
+				FString SourceLabel = TEXT("Flüssigkeitsvorkommen");
+				if (bOilExtractor)
+				{
+					SourceLabel = PurityNames[RouteIndex];
+				}
+				else if (bWaterExtractor)
+				{
+					SourceLabel = TEXT("Wasserfläche");
+				}
+
+				FSFPPlannerRecipe Recipe;
+				Recipe.ClassPath = bOilExtractor
+					? FString::Printf(
+						TEXT("SFP.DirectFluidExtractor|%s|%s|%d"),
+						*Info.ClassPath,
+						*ResourceClass->GetPathName(),
+						RouteIndex)
+					: FString::Printf(
+						TEXT("SFP.DirectFluidExtractor|%s|%s"),
+						*Info.ClassPath,
+						*ResourceClass->GetPathName());
+				Recipe.SourceMount = SolverSourceMountFromPath(Info.ClassPath);
+				Recipe.bAvailable = Info.bAvailable;
+				Recipe.DurationSeconds = CycleSeconds;
+				Recipe.MachineClass = Info.BuildableClass;
+				Recipe.MachineName = Info.DisplayName;
+				Recipe.BasePowerMW = Info.PowerMW;
+				Recipe.PowerExponent = FMath::Max(0.001, ReflectedNumberValue(
+					ExtractorCDO, Info.BuildableClass, TEXT("mPowerConsumptionExponent"), 1.0));
+				Recipe.MachineConfig = ReadMachineRuntimeConfig(ExtractorCDO, Info.BuildableClass);
+				Recipe.bDirectResourceExtraction = true;
+				Recipe.SourceName = ItemDisplayName(ResourceClass);
+				Recipe.ResourceNodeLabel = SourceLabel;
+				Recipe.DisplayName = FString::Printf(
+					TEXT("Förderung: %s (%s, %s)"),
+					*Recipe.SourceName,
+					*SourceLabel,
+					*Info.DisplayName);
+				Recipe.ConfigurationDetail = FString::Printf(
+					TEXT("%s | %s | %s m³/min pro Extraktor"),
+					*Recipe.SourceName,
+					*SourceLabel,
+					*FSFPNumberFormatting::Decimal(RatePerMinute));
+
+				FSFPPlannerItemRate Resource;
+				Resource.ItemClass = ResourceDescriptor;
+				Resource.ClassPath = ResourceClass->GetPathName();
+				Resource.DisplayName = Recipe.SourceName;
+				Resource.Form = SolverResourceFormToString(Form);
+				Resource.RatePerMinute = RatePerMinute;
+				Recipe.Ingredients.Add(Resource);
+				Recipe.Products.Add(Resource);
+
+				const int32 RecipeIndex = Recipes.Add(MoveTemp(Recipe));
+				RecipesByProduct.FindOrAdd(ResourceClass).Add(RecipeIndex);
+
+				TSharedPtr<FSFPProductOption>& Option = ProductsByClass.FindOrAdd(ResourceClass);
+				if (!Option.IsValid())
+				{
+					Option = MakeShared<FSFPProductOption>();
+					Option->ItemClass = ResourceDescriptor;
+					Option->ClassPath = ResourceClass->GetPathName();
+					Option->DisplayName = Resource.DisplayName;
+					Option->Form = Resource.Form;
+					Option->SourceMount = SolverSourceMountFromPath(Option->ClassPath);
+				}
+				++Option->RecipeCount;
+				Option->bHasAvailableRecipe |= Info.bAvailable;
 			}
-			++Option->RecipeCount;
-			Option->bHasAvailableRecipe |= Info.bAvailable;
 		}
 	}
 }
@@ -4065,6 +4110,277 @@ int32 FSFPPlannerSolver::BuildDemand(
 		return NodeId;
 	}
 
+	// A configured source mix is a capacity constraint, not another recipe.
+	// Split extraction over matching purity variants while keeping the
+	// selected miner/extractor and module loadout unchanged.
+	const FString ItemPath = ItemClass->GetPathName();
+	int32 MixedBaseRecipeIndex = INDEX_NONE;
+	// Automatic purity allocation must also run before the player has changed
+	// or saved any source limits. The selected purity is only a representative
+	// recipe for the chosen miner/module configuration; it must not restrict the
+	// automatic source family to that one purity.
+	if (!Context.bDispatchingMixedSource)
+	{
+		if (const FString* PreferredPath = Context.RecipeOverrides.Find(ItemPath))
+		{
+			MixedBaseRecipeIndex = Recipes.IndexOfByPredicate([PreferredPath](const FSFPPlannerRecipe& Candidate)
+			{
+				return Candidate.ClassPath == *PreferredPath;
+			});
+		}
+		if (MixedBaseRecipeIndex == INDEX_NONE)
+		{
+			int32 IgnoredCandidateCount = 0;
+			MixedBaseRecipeIndex = FindRecipeFor(
+				ItemClass,
+				Context.bOnlyAvailableRecipes,
+				nullptr,
+				nullptr,
+				IgnoredCandidateCount,
+				&Context.Result.SuppliedInputRates,
+				&Context.InputReachablePaths,
+				&Context.InputDistanceByPath);
+		}
+	}
+
+	const bool bBaseIsExtraction = Recipes.IsValidIndex(MixedBaseRecipeIndex)
+		&& Recipes[MixedBaseRecipeIndex].bDirectResourceExtraction
+		&& !Recipes[MixedBaseRecipeIndex].Ingredients.IsEmpty()
+		&& Recipes[MixedBaseRecipeIndex].Products.ContainsByPredicate([ItemClass](const FSFPPlannerItemRate& Product)
+		{
+			return Product.ItemClass.Get() == ItemClass;
+		});
+	if (bBaseIsExtraction)
+	{
+		const FSFPPlannerRecipe& BaseRecipe = Recipes[MixedBaseRecipeIndex];
+		const FString MixedSourcePath = BaseRecipe.Ingredients[0].ClassPath;
+		const FSFPResourceSourceMix AutomaticSourceMix;
+		const FSFPResourceSourceMix* ConfiguredSourceMix = Context.ResourceSourceMixes.Find(MixedSourcePath);
+		const FSFPResourceSourceMix* SourceMix = ConfiguredSourceMix != nullptr
+			? ConfiguredSourceMix : &AutomaticSourceMix;
+		if (SourceMix->bEnabled)
+		{
+			struct FMixedVariant
+			{
+				const TCHAR* Label = nullptr;
+				int32 Count = 0;
+				bool bLimited = false;
+				int32 RecipeIndex = INDEX_NONE;
+				int32 EffectiveCount = 0;
+			};
+			TArray<FMixedVariant> Variants = {
+				{TEXT("Rein"), FMath::Max(0, SourceMix->PureCount), SourceMix->bPureLimited, INDEX_NONE, 0},
+				{TEXT("Normal"), FMath::Max(0, SourceMix->NormalCount), SourceMix->bNormalLimited, INDEX_NONE, 0},
+				{TEXT("Unrein"), FMath::Max(0, SourceMix->ImpureCount), SourceMix->bImpureLimited, INDEX_NONE, 0}
+			};
+			for (FMixedVariant& Variant : Variants)
+			{
+				Variant.RecipeIndex = Recipes.IndexOfByPredicate([&](const FSFPPlannerRecipe& Candidate)
+				{
+					return Candidate.bDirectResourceExtraction
+						&& Candidate.ResourceNodeLabel.Equals(Variant.Label, ESearchCase::IgnoreCase)
+						&& Candidate.MachineClass == BaseRecipe.MachineClass
+						&& Candidate.SourceName == BaseRecipe.SourceName
+						&& Candidate.ModulesLabel == BaseRecipe.ModulesLabel
+						&& Candidate.FluidLabel == BaseRecipe.FluidLabel
+						&& !Candidate.Ingredients.IsEmpty()
+						&& Candidate.Ingredients[0].ClassPath == MixedSourcePath
+						&& Candidate.Products.ContainsByPredicate([ItemClass](const FSFPPlannerItemRate& Product)
+						{
+							return Product.ItemClass.Get() == ItemClass;
+						})
+						&& (!Context.bOnlyAvailableRecipes || Candidate.bAvailable);
+				});
+			}
+
+			const bool bHasPurityFamily = !Variants.ContainsByPredicate([](const FMixedVariant& Variant)
+			{
+				return Variant.RecipeIndex == INDEX_NONE;
+			});
+			if (bHasPurityFamily)
+			{
+				const FString PreviousOverride = Context.RecipeOverrides.FindRef(ItemPath);
+				const bool bHadOverride = Context.RecipeOverrides.Contains(ItemPath);
+				double RemainingRate = RequiredRate;
+				double TotalConfiguredCapacity = 0.0;
+				int32 FirstProviderNodeId = INDEX_NONE;
+				TArray<FString> MissingSourceAlternatives;
+				TMap<FString, double> CapacityPerSourceByLabel;
+				for (FMixedVariant& Variant : Variants)
+				{
+					if (!Recipes.IsValidIndex(Variant.RecipeIndex))
+					{
+						continue;
+					}
+					const FSFPPlannerRecipe& VariantRecipe = Recipes[Variant.RecipeIndex];
+					const FSFPPlannerItemRate* Product = VariantRecipe.Products.FindByPredicate([ItemClass](const FSFPPlannerItemRate& Candidate)
+					{
+						return Candidate.ItemClass.Get() == ItemClass;
+					});
+					if (Product == nullptr || Product->RatePerMinute <= KINDA_SMALL_NUMBER)
+					{
+						continue;
+					}
+
+					const FSFPMachinePlanSettings* SavedSettings = Context.MachineSettings.Find(VariantRecipe.ClassPath);
+					if (SavedSettings == nullptr)
+					{
+						SavedSettings = Context.MachineSettings.Find(BaseRecipe.ClassPath);
+					}
+					const double RequestedClock = SavedSettings != nullptr
+						? FMath::Max(0.001, SavedSettings->ClockPercent / 100.0)
+						: 1.0;
+					double ConfiguredClock = VariantRecipe.MachineConfig.bCanChangePotential
+						? FMath::Max(VariantRecipe.MachineConfig.MinPotential, RequestedClock)
+						: 1.0;
+					ConfiguredClock = VariantRecipe.MachineConfig.bRuntimeMaxPotentialKnown
+						? FMath::Min(VariantRecipe.MachineConfig.MaxPotential, ConfiguredClock)
+						: FMath::Min(10.0, ConfiguredClock);
+
+					int32 SomersloopCount = SavedSettings != nullptr ? FMath::Max(0, SavedSettings->SomersloopCount) : 0;
+					if (!VariantRecipe.MachineConfig.bCanChangeProductionBoost
+						|| VariantRecipe.MachineConfig.ProductionBoostPerSloop <= KINDA_SMALL_NUMBER)
+					{
+						SomersloopCount = 0;
+					}
+					else
+					{
+						SomersloopCount = VariantRecipe.MachineConfig.bRuntimeMaxProductionBoostKnown
+							? FMath::Min(SomersloopCount, VariantRecipe.MachineConfig.MaxSomersloops)
+							: FMath::Min(SomersloopCount, 64);
+					}
+					double ProductionBoost = VariantRecipe.MachineConfig.BaseProductionBoost
+						+ static_cast<double>(SomersloopCount) * VariantRecipe.MachineConfig.ProductionBoostPerSloop;
+					ProductionBoost = FMath::Max(0.001, ProductionBoost);
+					if (VariantRecipe.MachineConfig.bRuntimeMaxProductionBoostKnown)
+					{
+						ProductionBoost = FMath::Min(VariantRecipe.MachineConfig.MaxProductionBoost, ProductionBoost);
+					}
+
+					const double CapacityPerSource = Product->RatePerMinute * ConfiguredClock * ProductionBoost;
+					CapacityPerSourceByLabel.Add(Variant.Label, CapacityPerSource);
+					const FString UsageKey = MixedSourcePath + TEXT("|") + VariantRecipe.ClassPath;
+					const double AlreadyUsedRate = Context.MixedSourceUsedRates.FindRef(UsageKey);
+					Variant.EffectiveCount = Variant.bLimited
+						? Variant.Count
+						: FMath::Max(0, FMath::CeilToInt((AlreadyUsedRate + RemainingRate) / CapacityPerSource));
+					const double Capacity = static_cast<double>(Variant.EffectiveCount) * CapacityPerSource;
+					TotalConfiguredCapacity += Capacity;
+					if (Variant.EffectiveCount <= 0)
+					{
+						continue;
+					}
+					const double AvailableCapacity = FMath::Max(0.0, Capacity - AlreadyUsedRate);
+					const double AssignedRate = FMath::Min(RemainingRate, AvailableCapacity);
+					if (AssignedRate <= KINDA_SMALL_NUMBER)
+					{
+						continue;
+					}
+
+					Context.ProviderNodeByItem.Remove(ItemClass);
+					Context.RecipeIndexByItem.Remove(ItemClass);
+					if (const int32* ExistingProvider = Context.MixedProviderNodeByRecipe.Find(UsageKey))
+					{
+						Context.ProviderNodeByItem.Add(ItemClass, *ExistingProvider);
+						Context.RecipeIndexByItem.Add(ItemClass, Variant.RecipeIndex);
+					}
+					Context.RecipeOverrides.Add(ItemPath, VariantRecipe.ClassPath);
+					Context.bDispatchingMixedSource = true;
+					const int32 ProviderNodeId = BuildDemand(
+						ItemClass, ItemName, Form, AssignedRate, ConsumerNodeId, Depth, Context);
+					Context.bDispatchingMixedSource = false;
+					if (ProviderNodeId != INDEX_NONE)
+					{
+						FirstProviderNodeId = FirstProviderNodeId == INDEX_NONE ? ProviderNodeId : FirstProviderNodeId;
+						Context.MixedProviderNodeByRecipe.Add(UsageKey, ProviderNodeId);
+						Context.MixedSourceUsedRates.FindOrAdd(UsageKey) += AssignedRate;
+						FSFPPlanNode& ProviderNode = Context.Result.Nodes[ProviderNodeId];
+						ProviderNode.MaximumMachineCount = static_cast<double>(Variant.EffectiveCount) * ConfiguredClock;
+						const FString SourceKey = VariantRecipe.ClassPath + TEXT("|") + MixedSourcePath;
+						if (const int32* ResourceNodeId = Context.DirectResourceNodeByKey.Find(SourceKey))
+						{
+							FSFPPlanNode& ResourceNode = Context.Result.Nodes[*ResourceNodeId];
+							ResourceNode.MaximumMachineCount = static_cast<double>(Variant.EffectiveCount);
+							ResourceNode.Detail = Variant.bLimited
+								? FString::Printf(
+									TEXT("%d von %d × %s-Knoten genutzt | %s/min Abbauäquivalent"),
+									ProviderNode.BuiltMachineCount,
+									Variant.EffectiveCount,
+									Variant.Label,
+									*FSFPNumberFormatting::Decimal(ResourceNode.RatePerMinute))
+								: FString::Printf(
+									TEXT("%d × %s-Knoten benötigt (automatisch) | %s/min Abbauäquivalent"),
+									ProviderNode.BuiltMachineCount,
+									Variant.Label,
+									*FSFPNumberFormatting::Decimal(ResourceNode.RatePerMinute));
+						}
+					}
+					RemainingRate -= AssignedRate;
+					if (RemainingRate <= KINDA_SMALL_NUMBER)
+					{
+						break;
+					}
+				}
+
+				if (bHadOverride)
+				{
+					Context.RecipeOverrides.Add(ItemPath, PreviousOverride);
+				}
+				else
+				{
+					Context.RecipeOverrides.Remove(ItemPath);
+				}
+				Context.ProviderNodeByItem.Remove(ItemClass);
+				Context.RecipeIndexByItem.Remove(ItemClass);
+
+				if (RemainingRate > KINDA_SMALL_NUMBER)
+				{
+					MissingSourceAlternatives.Reset();
+					for (const FMixedVariant& Variant : Variants)
+					{
+						const double* PerSource = CapacityPerSourceByLabel.Find(Variant.Label);
+						if (PerSource != nullptr && *PerSource > KINDA_SMALL_NUMBER)
+						{
+							MissingSourceAlternatives.Add(FString::Printf(
+								TEXT("%d %s"), FMath::CeilToInt(RemainingRate / *PerSource), Variant.Label));
+						}
+					}
+					int32 ExternalNodeId = INDEX_NONE;
+					if (const int32* ExistingExternalNodeId = Context.MixedExternalNodeByItem.Find(ItemPath))
+					{
+						ExternalNodeId = *ExistingExternalNodeId;
+					}
+					else
+					{
+						FSFPPlanNode ExternalNode;
+						ExternalNode.Id = Context.Result.Nodes.Num();
+						ExternalNode.Type = ESFPPlanNodeType::Source;
+						ExternalNode.Depth = Depth;
+						ExternalNode.Title = ItemName;
+						ExternalNode.ClassPath = ItemPath;
+						ExternalNode.SourceCostMultiplier = 1000000.0;
+						ExternalNodeId = Context.Result.Nodes.Add(MoveTemp(ExternalNode));
+						Context.MixedExternalNodeByItem.Add(ItemPath, ExternalNodeId);
+					}
+					FSFPPlanNode& ExternalNode = Context.Result.Nodes[ExternalNodeId];
+					ExternalNode.RatePerMinute += RemainingRate;
+					ExternalNode.Detail = FString::Printf(
+						TEXT("Mischquellen reichen nicht aus: %s/min externe Zufuhr"),
+						*FSFPNumberFormatting::Decimal(ExternalNode.RatePerMinute));
+					AddOrMergeEdge(ExternalNodeId, ConsumerNodeId, ItemName, ItemPath, Form, RemainingRate, false);
+					Context.Result.Warnings.AddUnique(FString::Printf(
+						TEXT("%s: Mischquellen liefern höchstens %s/min; %s/min bleiben extern. Zusätzlich benötigt (alternativ): %s"),
+						*ItemName,
+						*FSFPNumberFormatting::Decimal(TotalConfiguredCapacity),
+						*FSFPNumberFormatting::Decimal(RemainingRate),
+						*FString::Join(MissingSourceAlternatives, TEXT(" oder "))));
+					FirstProviderNodeId = FirstProviderNodeId == INDEX_NONE ? ExternalNodeId : FirstProviderNodeId;
+				}
+				return FirstProviderNodeId;
+			}
+		}
+	}
+
 	if (const int32* ExistingNodeId = Context.ProviderNodeByItem.Find(ItemClass))
 	{
 		FSFPPlanNode& ExistingNode = Context.Result.Nodes[*ExistingNodeId];
@@ -4844,7 +5160,8 @@ FSFPPlanResult FSFPPlannerSolver::Solve(
 	const double EstimatedConnectionLengthMeters,
 	const FString& SelectedConveyorClassPath,
 	const FString& SelectedConveyorLiftClassPath,
-	const TMap<FString, FSFPMachinePlanSettings>& MachineSettings) const
+	const TMap<FString, FSFPMachinePlanSettings>& MachineSettings,
+	const TMap<FString, FSFPResourceSourceMix>& ResourceSourceMixes) const
 {
 	FSFPPlanTarget Target;
 	Target.ItemClass = TargetItem;
@@ -4866,7 +5183,8 @@ FSFPPlanResult FSFPPlannerSolver::Solve(
 		SelectedConveyorLiftClassPath,
 		TMap<FString, double>(),
 		true,
-		MachineSettings);
+		MachineSettings,
+		ResourceSourceMixes);
 }
 
 FSFPPlanResult FSFPPlannerSolver::Solve(
@@ -4878,7 +5196,8 @@ FSFPPlanResult FSFPPlannerSolver::Solve(
 	const FString& SelectedConveyorLiftClassPath,
 	const TMap<FString, double>& SuppliedInputs,
 	const bool bEnforceSupplyLimits,
-	const TMap<FString, FSFPMachinePlanSettings>& MachineSettings) const
+	const TMap<FString, FSFPMachinePlanSettings>& MachineSettings,
+	const TMap<FString, FSFPResourceSourceMix>& ResourceSourceMixes) const
 {
 	FSolveContext Context;
     Context.Result.SuppliedInputRates = SuppliedInputs;
@@ -4941,8 +5260,10 @@ FSFPPlanResult FSFPPlannerSolver::Solve(
 	Context.bOnlyAvailableRecipes = bOnlyAvailableRecipes;
 	Context.RecipeOverrides = RecipeOverrides;
 	Context.MachineSettings = MachineSettings;
+	Context.ResourceSourceMixes = ResourceSourceMixes;
 	Context.Result.RecipeOverrides = RecipeOverrides;
 	Context.Result.MachineSettings = MachineSettings;
+	Context.Result.ResourceSourceMixes = ResourceSourceMixes;
 	Context.Result.bOnlyAvailableRecipes = bOnlyAvailableRecipes;
 	Context.Result.EstimatedConnectionLengthMeters = FMath::Clamp(EstimatedConnectionLengthMeters, 0.5, 1000.0);
 
@@ -5189,6 +5510,7 @@ FSFPPlanResult FSFPPlannerSolver::SolvePower(const FSFPPowerPlanRequest& Request
 		OutResult.FueledAlienPowerAugmenters = FMath::Max(0, Request.FueledAlienPowerAugmenters);
 		OutResult.RecipeOverrides = Request.RecipeOverrides;
 		OutResult.MachineSettings = Request.MachineSettings;
+		OutResult.ResourceSourceMixes = Request.ResourceSourceMixes;
 		OutResult.bOnlyAvailableRecipes = Request.bOnlyAvailable;
 		OutResult.EstimatedConnectionLengthMeters = FMath::Clamp(
 			Request.EstimatedConnectionLengthMeters,
@@ -5326,6 +5648,7 @@ FSFPPlanResult FSFPPlannerSolver::SolvePower(const FSFPPowerPlanRequest& Request
 		Context.bOnlyAvailableRecipes = Request.bOnlyAvailable;
 		Context.RecipeOverrides = Request.RecipeOverrides;
 		Context.MachineSettings = Request.MachineSettings;
+		Context.ResourceSourceMixes = Request.ResourceSourceMixes;
 		Context.Result = OutResult;
 
 		FSFPPlanNode TargetNode;
@@ -5877,6 +6200,21 @@ FSFPPlanResult FSFPPlannerSolver::SolvePower(const FSFPPowerPlanRequest& Request
 	TSharedPtr<FSFPPlanResult> BestPlan;
 	bool bBestPlanUsesVariableOutput = false;
 	const bool bPreferStableAutomaticChoice = Request.GeneratorClassPath.IsEmpty();
+	FString LastCandidateError;
+	auto RememberCandidateError = [&LastCandidateError](
+		const FPowerCandidate& Candidate,
+		const FSFPPlanResult& FailedPlan,
+		const FString& Fallback)
+	{
+		const FString Reason = FailedPlan.ErrorMessage.IsEmpty()
+			? Fallback
+			: FailedPlan.ErrorMessage;
+		LastCandidateError = FString::Printf(
+			TEXT("%s mit %s: %s"),
+			Candidate.Generator != nullptr ? *Candidate.Generator->DisplayName : TEXT("Generator"),
+			Candidate.Fuel != nullptr ? *Candidate.Fuel->DisplayName : TEXT("Brennstoff"),
+			*Reason);
+	};
 	for (const FPowerCandidate& Candidate : Candidates)
 	{
 		double GeneratorGrossPowerMW = SFPVariablePower::GeneratorGrossForTarget(
@@ -5889,51 +6227,66 @@ FSFPPlanResult FSFPPlannerSolver::SolvePower(const FSFPPowerPlanRequest& Request
 
 		FSFPPlanResult FinalPlan;
 		bool bConverged = false;
-		for (int32 Iteration = 0; Iteration < 12; ++Iteration)
+		bool bCandidateBuildFailed = false;
+		const double NetToleranceMW = FMath::Max(
+			0.01,
+			RequiredNetWithReserve * 1.0e-9);
+		for (int32 Iteration = 0; Iteration < 64; ++Iteration)
 		{
 			FSFPPlanResult ProbePlan;
 			if (!BuildCandidate(Candidate, GeneratorGrossPowerMW, ProbePlan))
 			{
+				RememberCandidateError(
+					Candidate,
+					ProbePlan,
+					TEXT("Die Brennstoff- und Rohstoffkette konnte nicht vollständig bilanziert werden."));
+				bCandidateBuildFailed = true;
 				break;
 			}
-			const double RequiredTotalGross = RequiredNetWithReserve + ProbePlan.SelfConsumptionPowerMW;
-			const double NextGeneratorGross = SFPVariablePower::GeneratorGrossForTarget(
+			FinalPlan = MoveTemp(ProbePlan);
+			if (FinalPlan.NetPowerMW + NetToleranceMW >= RequiredNetWithReserve)
+			{
+				bConverged = true;
+				break;
+			}
+
+			const double RequiredTotalGross = RequiredNetWithReserve
+				+ FinalPlan.SelfConsumptionPowerMW + NetToleranceMW;
+			double NextGeneratorGross = SFPVariablePower::GeneratorGrossForTarget(
 				RequiredTotalGross,
 				Request.PassiveAlienPowerAugmenters,
 				Request.FueledAlienPowerAugmenters,
 				AlienPowerAugmenter.BasePowerPerAugmenterMW,
 				AlienPowerAugmenter.PassiveBoostPerAugmenter,
 				AlienPowerAugmenter.FueledBoostPerAugmenter);
-			FinalPlan = MoveTemp(ProbePlan);
-			if (FMath::Abs(NextGeneratorGross - GeneratorGrossPowerMW) <= 0.005)
+			// Non-linear machine clocking and whole-machine boundaries can make the
+			// fixed-point step stall just below the requested net output. Keep the
+			// sequence monotonic and close the measured shortfall in that case.
+			if (!FMath::IsFinite(NextGeneratorGross)
+				|| NextGeneratorGross <= GeneratorGrossPowerMW + 0.005)
 			{
-				bConverged = true;
-				break;
+				NextGeneratorGross = GeneratorGrossPowerMW
+					+ FMath::Max(
+						RequiredNetWithReserve - FinalPlan.NetPowerMW + NetToleranceMW,
+						0.01);
 			}
 			GeneratorGrossPowerMW = NextGeneratorGross;
 		}
 
+		if (bCandidateBuildFailed)
+		{
+			continue;
+		}
 		if (!bConverged)
 		{
-			if (!BuildCandidate(Candidate, GeneratorGrossPowerMW, FinalPlan))
-			{
-				continue;
-			}
-		}
-		if (FinalPlan.NetPowerMW + 0.01 < RequiredNetWithReserve)
-		{
-			const double CorrectedGeneratorGross = SFPVariablePower::GeneratorGrossForTarget(
-				RequiredNetWithReserve + FinalPlan.SelfConsumptionPowerMW + 0.02,
-				Request.PassiveAlienPowerAugmenters,
-				Request.FueledAlienPowerAugmenters,
-				AlienPowerAugmenter.BasePowerPerAugmenterMW,
-				AlienPowerAugmenter.PassiveBoostPerAugmenter,
-				AlienPowerAugmenter.FueledBoostPerAugmenter);
-			if (!BuildCandidate(Candidate, CorrectedGeneratorGross, FinalPlan)
-				|| FinalPlan.NetPowerMW + 0.01 < RequiredNetWithReserve)
-			{
-				continue;
-			}
+			RememberCandidateError(
+				Candidate,
+				FinalPlan,
+				FString::Printf(
+					TEXT("Die Kette erreicht nach 64 Eigenverbrauchsschritten %s MW netto; benötigt werden einschließlich Reserve %s MW."),
+					*FSFPNumberFormatting::Decimal(FinalPlan.NetPowerMW, 2),
+					*FSFPNumberFormatting::Decimal(RequiredNetWithReserve, 2)));
+			continue;
 		}
 
 		const bool bSameOutputStability = !bPreferStableAutomaticChoice
@@ -5962,7 +6315,11 @@ FSFPPlanResult FSFPPlannerSolver::SolvePower(const FSFPPowerPlanRequest& Request
 
 	if (!BestPlan.IsValid())
 	{
-		InvalidResult.ErrorMessage = TEXT("Für diese Stromvorgabe konnte keine vollständige Erzeugungskette berechnet werden");
+		InvalidResult.ErrorMessage = LastCandidateError.IsEmpty()
+			? TEXT("Für diese Stromvorgabe konnte keine vollständige Erzeugungskette berechnet werden")
+			: FString::Printf(
+				TEXT("Für diese Stromvorgabe konnte keine vollständige Erzeugungskette berechnet werden. %s"),
+				*LastCandidateError);
 		return InvalidResult;
 	}
 	if (Request.GeneratorClassPath.IsEmpty() || Request.FuelClassPath.IsEmpty())

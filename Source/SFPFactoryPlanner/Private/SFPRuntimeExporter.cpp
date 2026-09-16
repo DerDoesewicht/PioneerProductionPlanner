@@ -710,7 +710,7 @@ FSFPExportResult USFPRuntimeExporter::ExportRuntimeData(const UObject* WorldCont
 	FString DiagnosticError;
 	const bool bDiagnosticSuccess = DiagnosticSolver.Initialize(World, DiagnosticError);
 	TSharedRef<FJsonObject> MinerDiagnosticJson = MakeShared<FJsonObject>();
-	MinerDiagnosticJson->SetStringField(TEXT("build"), TEXT("1.4.1-Release"));
+	MinerDiagnosticJson->SetStringField(TEXT("build"), TEXT("1.5.1-Release"));
 	MinerDiagnosticJson->SetBoolField(TEXT("catalogInitialized"), bDiagnosticSuccess);
 	MinerDiagnosticJson->SetStringField(TEXT("error"), DiagnosticError);
 	TArray<TSharedPtr<FJsonValue>> MinerTrace;

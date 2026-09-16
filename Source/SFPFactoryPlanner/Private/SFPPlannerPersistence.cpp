@@ -52,6 +52,8 @@ namespace
 		Json->SetNumberField(TEXT("fullClockMachineCount"), Node.FullClockMachineCount);
 		Json->SetNumberField(TEXT("configuredClockPercent"), Node.ConfiguredClockPercent);
 		Json->SetNumberField(TEXT("partialClockPercent"), Node.PartialClockPercent);
+		Json->SetNumberField(TEXT("maximumMachineCount"), Node.MaximumMachineCount);
+		Json->SetNumberField(TEXT("sourceCostMultiplier"), Node.SourceCostMultiplier);
 		Json->SetNumberField(TEXT("somersloopCount"), Node.SomersloopCount);
 		Json->SetNumberField(TEXT("productionBoost"), Node.ProductionBoost);
 		Json->SetNumberField(TEXT("powerMW"), Node.PowerMW);
@@ -158,6 +160,8 @@ namespace
 		}
 		Json->TryGetNumberField(TEXT("configuredClockPercent"), OutNode.ConfiguredClockPercent);
 		Json->TryGetNumberField(TEXT("partialClockPercent"), OutNode.PartialClockPercent);
+		Json->TryGetNumberField(TEXT("maximumMachineCount"), OutNode.MaximumMachineCount);
+		Json->TryGetNumberField(TEXT("sourceCostMultiplier"), OutNode.SourceCostMultiplier);
 		if (Json->TryGetNumberField(TEXT("somersloopCount"), Number) && IsFiniteInt32(Number))
 		{
 			OutNode.SomersloopCount = FMath::Max(0, FMath::RoundToInt(Number));
@@ -243,6 +247,7 @@ namespace
 			|| Plan.Edges.Num() > SFPMaxSharedPlanEdges
 			|| Plan.RecipeOverrides.Num() > 5000
 			|| Plan.MachineSettings.Num() > 5000
+			|| Plan.ResourceSourceMixes.Num() > 5000
 			|| Plan.AvailableInputRates.Num() > 5000
 			|| Plan.Warnings.Num() > 512)
 		{
@@ -330,6 +335,8 @@ namespace
 				|| !FMath::IsFinite(Node.MachineCount)
 				|| !FMath::IsFinite(Node.ConfiguredClockPercent)
 				|| !FMath::IsFinite(Node.PartialClockPercent)
+				|| !FMath::IsFinite(Node.MaximumMachineCount)
+				|| !FMath::IsFinite(Node.SourceCostMultiplier)
 				|| !FMath::IsFinite(Node.ProductionBoost)
 				|| !FMath::IsFinite(Node.PowerMW)
 				|| !FMath::IsFinite(Node.FuelEnergyValueMJ)
@@ -340,6 +347,8 @@ namespace
 				|| Node.FullClockMachineCount < 0 || Node.FullClockMachineCount > 1000000
 				|| Node.ConfiguredClockPercent < 0.0 || Node.ConfiguredClockPercent > 100000.0
 				|| Node.PartialClockPercent < 0.0 || Node.PartialClockPercent > 100000.0
+				|| Node.MaximumMachineCount < 0.0 || Node.MaximumMachineCount > 1.0e9
+				|| Node.SourceCostMultiplier < 0.001 || Node.SourceCostMultiplier > 1.0e9
 				|| Node.SomersloopCount < 0 || Node.SomersloopCount > 1024
 				|| Node.ProductionBoost <= 0.0 || Node.ProductionBoost > 10000.0
 				|| FMath::Abs(Node.PowerMW) > 1.0e12
@@ -412,6 +421,18 @@ namespace
 				|| Settings.SomersloopCount > 1024)
 			{
 				OutError = TEXT("Der Multiplayer-Plan enthält eine ungültige Maschinenkonfiguration");
+				return false;
+			}
+		}
+		for (const TPair<FString, FSFPResourceSourceMix>& Pair : Plan.ResourceSourceMixes)
+		{
+			const FSFPResourceSourceMix& Mix = Pair.Value;
+			if (Pair.Key.Len() > 1024
+				|| Mix.ImpureCount < 0 || Mix.ImpureCount > 100000
+				|| Mix.NormalCount < 0 || Mix.NormalCount > 100000
+				|| Mix.PureCount < 0 || Mix.PureCount > 100000)
+			{
+				OutError = TEXT("Der Multiplayer-Plan enthält einen ungültigen Vorkommensmix");
 				return false;
 			}
 		}
@@ -642,6 +663,22 @@ namespace
 			MachineSettings->SetObjectField(Pair.Key, Settings);
 		}
 		Root->SetObjectField(TEXT("machineSettings"), MachineSettings);
+
+		TSharedRef<FJsonObject> ResourceSourceMixes = MakeShared<FJsonObject>();
+		for (const TPair<FString, FSFPResourceSourceMix>& Pair : Plan.ResourceSourceMixes)
+		{
+			TSharedRef<FJsonObject> Mix = MakeShared<FJsonObject>();
+			Mix->SetBoolField(TEXT("enabled"), Pair.Value.bEnabled);
+			Mix->SetBoolField(TEXT("useOccupiedSources"), Pair.Value.bUseOccupiedSources);
+			Mix->SetBoolField(TEXT("impureLimited"), Pair.Value.bImpureLimited);
+			Mix->SetBoolField(TEXT("normalLimited"), Pair.Value.bNormalLimited);
+			Mix->SetBoolField(TEXT("pureLimited"), Pair.Value.bPureLimited);
+			Mix->SetNumberField(TEXT("impureCount"), Pair.Value.ImpureCount);
+			Mix->SetNumberField(TEXT("normalCount"), Pair.Value.NormalCount);
+			Mix->SetNumberField(TEXT("pureCount"), Pair.Value.PureCount);
+			ResourceSourceMixes->SetObjectField(Pair.Key, Mix);
+		}
+		Root->SetObjectField(TEXT("resourceSourceMixes"), ResourceSourceMixes);
 
 		TSharedRef<FJsonObject> AvailableInputRates = MakeShared<FJsonObject>();
 		for (const TPair<FString, double>& Pair : Plan.AvailableInputRates)
@@ -1059,6 +1096,38 @@ namespace
 				{
 					Plan->MachineSettings.Add(Pair.Key, MoveTemp(Settings));
 				}
+			}
+		}
+
+		const TSharedPtr<FJsonObject>* ResourceSourceMixesObject = nullptr;
+		if (Root->TryGetObjectField(TEXT("resourceSourceMixes"), ResourceSourceMixesObject)
+			&& ResourceSourceMixesObject != nullptr
+			&& ResourceSourceMixesObject->IsValid())
+		{
+			for (const TPair<FString, TSharedPtr<FJsonValue>>& Pair : (*ResourceSourceMixesObject)->Values)
+			{
+				if (!Pair.Value.IsValid() || Pair.Value->Type != EJson::Object) continue;
+				const TSharedPtr<FJsonObject> MixJson = Pair.Value->AsObject();
+				if (!MixJson.IsValid()) continue;
+				FSFPResourceSourceMix Mix;
+				MixJson->TryGetBoolField(TEXT("enabled"), Mix.bEnabled);
+				MixJson->TryGetBoolField(TEXT("useOccupiedSources"), Mix.bUseOccupiedSources);
+				// r4-r6 stored every count as a hard cap. Preserve that meaning when
+				// loading an older plan that has no explicit limitation flags.
+				if (!MixJson->TryGetBoolField(TEXT("impureLimited"), Mix.bImpureLimited))
+					Mix.bImpureLimited = true;
+				if (!MixJson->TryGetBoolField(TEXT("normalLimited"), Mix.bNormalLimited))
+					Mix.bNormalLimited = true;
+				if (!MixJson->TryGetBoolField(TEXT("pureLimited"), Mix.bPureLimited))
+					Mix.bPureLimited = true;
+				double Number = 0.0;
+				if (MixJson->TryGetNumberField(TEXT("impureCount"), Number) && IsFiniteInt32(Number))
+					Mix.ImpureCount = FMath::Clamp(FMath::RoundToInt(Number), 0, 100000);
+				if (MixJson->TryGetNumberField(TEXT("normalCount"), Number) && IsFiniteInt32(Number))
+					Mix.NormalCount = FMath::Clamp(FMath::RoundToInt(Number), 0, 100000);
+				if (MixJson->TryGetNumberField(TEXT("pureCount"), Number) && IsFiniteInt32(Number))
+					Mix.PureCount = FMath::Clamp(FMath::RoundToInt(Number), 0, 100000);
+				Plan->ResourceSourceMixes.Add(Pair.Key, Mix);
 			}
 		}
 

@@ -1,3 +1,85 @@
+# Pioneer Production Planner 1.5.1
+
+## Power-planning fixes
+
+- Fixed power-plan persistence so a newly selected generator or fuel can no longer be written into an older calculated result.
+- Enforces that a successful power result uses the exact manually selected generator and fuel.
+- Marks pending power settings and failed recalculations directly in the grid summary while retaining the last successful result for reference.
+- Preserves the concrete solver error when a selected generator/fuel chain cannot be completed.
+- Extends self-consumption convergence for very large and power-intensive chains such as Ficsonium Fuel Rod production.
+- Accepts a power result only after the requested net output including its configured reserve is actually reached.
+- Stabilizes large material-balance objectives without changing recipe quantities or source constraints.
+- Recipe output and grouped raw-resource names now resolve from the current runtime language instead of retaining cached German labels in English games.
+- Clarifies that using the current factory demand replaces the manual net-power target.
+
+## Included from 1.5.0 – World-aware resource planning
+
+- Reads standard resource nodes and placed extractors from the authoritative loaded world.
+- Shows total, occupied and free counts for impure, normal and pure nodes.
+- Uses currently free nodes as automatic limits for ordinary factory plans and power/fuel plans.
+- Adds an option to include already occupied sources when existing extraction should be shared.
+- Keeps explicit per-purity limits as manual overrides; `0` still excludes that purity.
+- Shows required, available and missing source counts in extraction settings.
+- Transfers the server inventory to the owning multiplayer client instead of relying on client-side actor visibility.
+- Excludes portable miners, water extractors and resource-well/fracking actors from standard-node occupancy matching.
+
+## Included from 1.4.5-r8 – Automatic Purity Selection Fix
+
+- Automatic purity allocation now runs without requiring a previously saved source mix.
+- The selected representative purity no longer limits automatic allocation to that purity.
+- Hides the manual **Purity** selector in normal and grouped extraction cards while automatic allocation is enabled.
+- Disabling automatic allocation restores the manual selector as a fallback.
+- Applies to ordinary production plans and power/fuel production plans.
+
+## Included from 1.4.5-r7 – Automatic Resource Source Mix
+
+- Automatically calculates the required pure, normal and impure resource-node mix.
+- Uses pure nodes first, followed by normal and impure nodes, minimizing the number of required sources by default.
+- Shows **Required** counts per purity in the extraction settings.
+- Adds an independent availability limit for each purity; setting a limit to `0` excludes it.
+- Recalculating redistributes unmet extraction demand across the remaining allowed purities.
+- Applies to normal production plans, power/fuel plans, Vanilla ores, Crude Oil and compatible Satisfactory Plus extraction routes.
+- Existing r4-r6 saved source counts retain their previous hard-cap meaning.
+
+## Included from 1.4.5-r6 – Power Plan Editing
+
+- Active power and fuel-production plans can now be recalculated directly from the Planning tab.
+- Recipe, extraction and machine changes made while viewing a power plan are passed back into the power solver.
+- The Planning-tab action changes to **Recalculate Power & Fuel Production** while a power plan is active.
+- No unrelated final product is required for this workflow.
+- Explicitly adding a final-product target still switches the action back to normal multi-product planning.
+
+## Included from 1.4.5-r5 – Clear Product Selection
+
+- The final-product catalog now starts without an automatically highlighted first entry.
+- Added **Clear Selection** to remove the current product highlight explicitly.
+- Calculating a production plan no longer silently adds a highlighted catalog item; products must be confirmed with **+ Add Target**.
+- Loading or calculating a power-production plan no longer retains an unrelated default product selection.
+- Added matching German and English UI text.
+
+## Included from 1.4.5-r4 – Mixed Resource Sources
+
+- Added per-resource counts for impure, normal and pure deposits.
+- Applies mixed-source planning to Vanilla miners, Satisfactory Plus ores, modular-miner processing routes and Crude Oil extractors.
+- Enforces the combined source capacity instead of silently creating additional deposits.
+- Shows separate purity groups and used/available source counts in the graph.
+- Reports an external shortfall together with alternative additional pure, normal or impure deposit counts.
+- Saves the source mix in personal and multiplayer plans and restores it when a plan is loaded.
+
+## Included from 1.4.5-r3
+
+- Registers the vanilla Oil Extractor as a direct Crude Oil source.
+- Adds impure, normal and pure oil-node routes using runtime extractor rates.
+- Shows Oil Extractor counts and extraction power in the plan and graph.
+- Keeps manual MW fuel planning active without a calculated factory plan.
+- Includes the r2 checked-format compilation fix.
+
+- Adds a power-target mode that reuses the current factory plan's calculated power demand.
+- Keeps manual net-power targets available.
+- Makes complete production planning for the selected generator fuel explicit in the Power Supply tab.
+- Iteratively includes fuel-production self-consumption and the configured safety reserve.
+- Adds matching German and English UI text.
+
 # Pioneer Production Planner 1.4.1
 
 - Resolves production-graph route names from current runtime item descriptors, including previously saved S+ plans.

@@ -3,6 +3,7 @@
 #include "CoreMinimal.h"
 #include "SFPPlannerPersistence.h"
 #include "SFPPlannerTypes.h"
+#include "SFPResourceNodeInventory.h"
 #include "SFPSharedPlanTypes.h"
 #include "Widgets/SCompoundWidget.h"
 #include "Widgets/Input/SComboBox.h"
@@ -71,6 +72,7 @@ public:
 		const FString& FileName,
 		const FString& PlanName,
 		const FString& DeletedBy);
+	void ReceiveResourceNodeInventory(const FString& InventoryJson, const FString& Error);
 
 	virtual bool SupportsKeyboardFocus() const override { return true; }
 	virtual FReply OnKeyDown(const FGeometry& MyGeometry, const FKeyEvent& InKeyEvent) override;
@@ -118,6 +120,7 @@ private:
 	void CaptureInputBudgetsToPlan();
 	void RefreshMachineSettings();
 	void RefreshRecipeChoices(const TSharedPtr<FSFPPlanResult>& Plan);
+	TMap<FString, FSFPResourceSourceMix> BuildEffectiveResourceSourceMixes() const;
 	TSharedRef<ITableRow> HandleGenerateRecipeChoiceRow(
 		TSharedPtr<FSFPRecipeChoiceRow> Row,
 		const TSharedRef<STableViewBase>& OwnerTable);
@@ -145,6 +148,10 @@ private:
 	void HandleTargetRateChanged(double NewValue);
 	TOptional<double> GetPowerTargetNetMW() const;
 	void HandlePowerTargetNetMWChanged(double NewValue);
+	ECheckBoxState GetUseFactoryPowerDemandState() const;
+	void HandleUseFactoryPowerDemandChanged(ECheckBoxState NewState);
+	FText GetFactoryPowerDemandText() const;
+	double ResolvePowerTargetNetMW() const;
 	TOptional<double> GetPowerReservePercent() const;
 	void HandlePowerReservePercentChanged(double NewValue);
 	TOptional<double> GetPowerGeneratorClockPercent() const;
@@ -164,6 +171,7 @@ private:
 	FText GetSelectedPowerFuelText() const;
 	FText GetStatusText() const;
 	FText GetPowerSummaryText() const;
+	bool IsPowerPlanRequestDirty() const;
 	FText GetMachineSummaryText() const;
 	FText GetResourceSummaryText() const;
 	FText GetGraphProgressText() const;
@@ -210,6 +218,9 @@ private:
 	TSharedPtr<SComboBox<TSharedPtr<FSFPPowerFuelOption>>> PowerFuelCombo;
 	TMap<FString, FString> RecipeOverrides;
 	TMap<FString, FSFPMachinePlanSettings> MachineSettingsOverrides;
+	TMap<FString, FSFPResourceSourceMix> ResourceSourceMixes;
+	TMap<FString, FSFPResourceNodeAvailability> ResourceNodeAvailability;
+	FString ResourceNodeInventoryError;
 	TArray<TSharedPtr<FSFPSavedPlanInfo>> SavedPlans;
 	TSharedPtr<FSFPSavedPlanInfo> SelectedSavedPlan;
 	TSharedPtr<SComboBox<TSharedPtr<FSFPSavedPlanInfo>>> SavedPlanCombo;
@@ -222,12 +233,15 @@ private:
 	FString SearchText;
 	FString PlanNameText;
 	FString StatusText;
+	FString PowerCalculationError;
 	FString PendingSharedPlanSelection;
 	FString ActiveSharedPlanFileName;
 	FString IgnoreNextSharedChangeFileName;
 	int64 ActiveSharedPlanRevision = 0;
 	double TargetRate = 60.0;
 	double PowerTargetNetMW = 1000.0;
+	double LastFactoryPowerDemandMW = 0.0;
+	bool bUseCurrentFactoryPowerDemand = false;
 	double PowerReservePercent = 10.0;
 	double PowerGeneratorClockPercent = 100.0;
 	int32 PassiveAlienPowerAugmenters = 0;

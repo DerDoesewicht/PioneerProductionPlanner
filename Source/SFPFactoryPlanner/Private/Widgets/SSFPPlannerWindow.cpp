@@ -1,6 +1,7 @@
 #include "Widgets/SSFPPlannerWindow.h"
 
 #include "FGPlayerController.h"
+#include "Resources/FGItemDescriptor.h"
 #include "HAL/PlatformTime.h"
 #include "SFPLocalization.h"
 #include "SFPNumberFormatting.h"
@@ -13,6 +14,7 @@
 #include "Framework/Application/SlateApplication.h"
 #include "InputCoreTypes.h"
 #include "Misc/Paths.h"
+#include "UObject/SoftObjectPath.h"
 #include "Widgets/Input/SButton.h"
 #include "Widgets/Input/SCheckBox.h"
 #include "Widgets/Input/SComboBox.h"
@@ -48,6 +50,25 @@ namespace SFPPlannerWindowPrivate
 	constexpr int32 MachinesTabIndex = 2;
 	constexpr int32 ResourcesTabIndex = 3;
 	constexpr int32 GraphTabIndex = 4;
+
+	FString CurrentPlannerItemName(const FString& StoredName, const FString& ItemClassPath)
+	{
+		FString DisplayName = StoredName;
+		if (!ItemClassPath.IsEmpty() && !ItemClassPath.StartsWith(TEXT("SFP.")))
+		{
+			UClass* ItemClass = FSoftClassPath(ItemClassPath).ResolveClass();
+			if (IsValid(ItemClass) && ItemClass->IsChildOf(UFGItemDescriptor::StaticClass()))
+			{
+				const FString RuntimeName = UFGItemDescriptor::GetItemName(
+					TSubclassOf<UFGItemDescriptor>(ItemClass)).ToString();
+				if (!RuntimeName.IsEmpty())
+				{
+					DisplayName = RuntimeName;
+				}
+			}
+		}
+		return SFPLocalization::Translate(DisplayName);
+	}
 
 	FString BuildNodeCompletionKey(const FSFPPlanNode& Node)
 	{
@@ -488,10 +509,6 @@ void SSFPPlannerWindow::Construct(const FArguments& InArgs)
 
 	RefreshNamedPlans();
 
-	if (ProductList.IsValid() && !FilteredProducts.IsEmpty())
-	{
-		ProductList->SetSelection(FilteredProducts[0]);
-	}
 	RestoreLastPlan();
 }
 
@@ -698,9 +715,36 @@ TSharedRef<SWidget> SSFPPlannerWindow::BuildPlanningTab()
 					.OnSelectionChanged(this, &SSFPPlannerWindow::HandleProductSelected)
 				]
                 ]
-                + SVerticalBox::Slot().AutoHeight().Padding(0, 4)
-                [ SNew(SButton).Text_Lambda([this]() { return SelectedProduct.IsValid() ? FText::FromString(SelectedProduct->DisplayName) : SFPLocalization::Text(TEXT("Produkt auswählen")); })
-                  .OnClicked_Lambda([this]() { bShowProductSearch = !bShowProductSearch; return FReply::Handled(); }) ]
+				+ SVerticalBox::Slot().AutoHeight().Padding(0, 4)
+				[
+					SNew(SHorizontalBox)
+					+ SHorizontalBox::Slot()
+					.FillWidth(1.0f)
+					[
+						SNew(SButton)
+						.Text_Lambda([this]() { return SelectedProduct.IsValid() ? FText::FromString(SelectedProduct->DisplayName) : SFPLocalization::Text(TEXT("Produkt auswählen")); })
+						.OnClicked_Lambda([this]() { bShowProductSearch = !bShowProductSearch; return FReply::Handled(); })
+					]
+					+ SHorizontalBox::Slot()
+					.AutoWidth()
+					.Padding(6.0f, 0.0f, 0.0f, 0.0f)
+					[
+						SNew(SButton)
+						.Text(SFPLocalization::Text(TEXT("AUSWAHL LEEREN")))
+						.ToolTipText(SFPLocalization::Text(TEXT("Produktmarkierung aufheben, ohne ein Endprodukt hinzuzufügen")))
+						.IsEnabled_Lambda([this]() { return SelectedProduct.IsValid(); })
+						.OnClicked_Lambda([this]()
+						{
+							SelectedProduct.Reset();
+							if (ProductList.IsValid())
+							{
+								ProductList->ClearSelection();
+							}
+							StatusText = TEXT("Produktmarkierung aufgehoben");
+							return FReply::Handled();
+						})
+					]
+				]
 				+ SVerticalBox::Slot()
 				.AutoHeight()
 				.Padding(0.0f, 9.0f, 0.0f, 3.0f)
@@ -846,8 +890,16 @@ TSharedRef<SWidget> SSFPPlannerWindow::BuildPlanningTab()
 					.OnClicked(this, &SSFPPlannerWindow::HandleCalculate)
 					[
 						SNew(STextBlock)
-						.Text(SFPLocalization::Text(TEXT("MEHRPRODUKT-PLAN BERECHNEN")))
-						.Font(FCoreStyle::GetDefaultFontStyle(TEXT("Bold"), 11))
+							.Text_Lambda([this]()
+							{
+								const bool bEditingPowerPlan = CurrentPlan.IsValid()
+									&& CurrentPlan->bPowerProductionPlan
+									&& SelectedTargets.IsEmpty();
+								return SFPLocalization::Text(bEditingPowerPlan
+									? TEXT("STROM- & BRENNSTOFFPRODUKTION NEU BERECHNEN")
+									: TEXT("MEHRPRODUKT-PLAN BERECHNEN"));
+							})
+							.Font(FCoreStyle::GetDefaultFontStyle(TEXT("Bold"), 11))
 					]
 				]
 			]
@@ -1013,6 +1065,29 @@ TSharedRef<SWidget> SSFPPlannerWindow::BuildPowerTab()
 				]
 				+ SVerticalBox::Slot()
 				.AutoHeight()
+				.Padding(0.0f, 0.0f, 0.0f, 5.0f)
+				[
+					SNew(SCheckBox)
+					.IsChecked(this, &SSFPPlannerWindow::GetUseFactoryPowerDemandState)
+					.IsEnabled_Lambda([this]() { return LastFactoryPowerDemandMW > KINDA_SMALL_NUMBER; })
+					.OnCheckStateChanged(this, &SSFPPlannerWindow::HandleUseFactoryPowerDemandChanged)
+					[
+						SNew(STextBlock)
+						.Text(SFPLocalization::Text(TEXT("STROMBEDARF DES AKTUELLEN FABRIKPLANS ALS ZIEL VERWENDEN")))
+						.ColorAndOpacity(SFPTheme::Text)
+					]
+				]
+				+ SVerticalBox::Slot()
+				.AutoHeight()
+				.Padding(0.0f, 0.0f, 0.0f, 12.0f)
+				[
+					SNew(STextBlock)
+					.Text(this, &SSFPPlannerWindow::GetFactoryPowerDemandText)
+					.AutoWrapText(true)
+					.ColorAndOpacity(SFPTheme::MutedText)
+				]
+				+ SVerticalBox::Slot()
+				.AutoHeight()
 				.Padding(0.0f, 0.0f, 0.0f, 3.0f)
 				[
 					SNew(STextBlock)
@@ -1030,6 +1105,7 @@ TSharedRef<SWidget> SSFPPlannerWindow::BuildPowerTab()
 					.MaxValue(1000000000.0)
 					.MinSliderValue(1.0)
 					.MaxSliderValue(10000.0)
+					.IsEnabled_Lambda([this]() { return !bUseCurrentFactoryPowerDemand; })
 					.Value(this, &SSFPPlannerWindow::GetPowerTargetNetMW)
 					.OnValueChanged(this, &SSFPPlannerWindow::HandlePowerTargetNetMWChanged)
 				]
@@ -1255,7 +1331,7 @@ TSharedRef<SWidget> SSFPPlannerWindow::BuildPowerTab()
 					.OnClicked(this, &SSFPPlannerWindow::HandleCalculatePower)
 					[
 						SNew(STextBlock)
-						.Text(SFPLocalization::Text(TEXT("NETTO-STROMPLAN BERECHNEN")))
+						.Text(SFPLocalization::Text(TEXT("STROM- & BRENNSTOFFPRODUKTION BERECHNEN")))
 						.Font(FCoreStyle::GetDefaultFontStyle(TEXT("Bold"), 11))
 					]
 				]
@@ -1542,10 +1618,7 @@ void SSFPPlannerWindow::RefreshProducts()
 		if (!SelectedProduct.IsValid() || !FilteredProducts.Contains(SelectedProduct))
 		{
 			SelectedProduct.Reset();
-			if (!FilteredProducts.IsEmpty())
-			{
-				ProductList->SetSelection(FilteredProducts[0]);
-			}
+			ProductList->ClearSelection();
 		}
 	}
 }
@@ -1778,6 +1851,7 @@ void SSFPPlannerWindow::HandlePowerGeneratorSelected(
 	TSharedPtr<FSFPPowerGeneratorOption> Choice,
 	const ESelectInfo::Type SelectInfo)
 {
+	PowerCalculationError.Reset();
 	SelectedPowerGenerator = MoveTemp(Choice);
 	if (SelectedPowerGenerator.IsValid())
 	{
@@ -1805,6 +1879,7 @@ void SSFPPlannerWindow::HandlePowerFuelSelected(
 	TSharedPtr<FSFPPowerFuelOption> Choice,
 	const ESelectInfo::Type SelectInfo)
 {
+	PowerCalculationError.Reset();
 	SelectedPowerFuel = MoveTemp(Choice);
 	if (SelectedPowerFuel.IsValid() && SelectInfo != ESelectInfo::Direct)
 	{
@@ -2052,22 +2127,76 @@ FReply SSFPPlannerWindow::HandleCalculate()
 		StatusText = TEXT("Der Planner-Solver ist nicht verfügbar");
 		return FReply::Handled();
 	}
+	if (CurrentPlan.IsValid() && CurrentPlan->bPowerProductionPlan && SelectedTargets.IsEmpty())
+	{
+		return HandleCalculatePower();
+	}
 	if (SelectedTargets.IsEmpty())
 	{
-		if (!SelectedProduct.IsValid())
-		{
-			StatusText = TEXT("Bitte mindestens ein Endprodukt hinzufügen");
-			return FReply::Handled();
-		}
-		HandleAddTarget();
+		StatusText = TEXT("Bitte mindestens ein Endprodukt mit + Ziel hinzufügen");
+		return FReply::Handled();
 	}
 	// Keep values for inputs that still exist when only a recipe or rate changes.
 	CalculateForTargets(1.0, true);
 	return FReply::Handled();
 }
 
+void SSFPPlannerWindow::ReceiveResourceNodeInventory(
+	const FString& InventoryJson,
+	const FString& Error)
+{
+	ResourceNodeInventoryError = Error;
+	ResourceNodeAvailability.Reset();
+	if (Error.IsEmpty() && !InventoryJson.IsEmpty())
+	{
+		FString ParseError;
+		if (!SFPResourceNodeInventory::FromJson(
+			InventoryJson,
+			ResourceNodeAvailability,
+			ParseError))
+		{
+			ResourceNodeInventoryError = ParseError;
+		}
+	}
+	if (RecipeChoiceList.IsValid())
+	{
+		RecipeChoiceList->RebuildList();
+	}
+}
+
+TMap<FString, FSFPResourceSourceMix> SSFPPlannerWindow::BuildEffectiveResourceSourceMixes() const
+{
+	TMap<FString, FSFPResourceSourceMix> Effective = ResourceSourceMixes;
+	for (const TPair<FString, FSFPResourceNodeAvailability>& Pair : ResourceNodeAvailability)
+	{
+		FSFPResourceSourceMix& Mix = Effective.FindOrAdd(Pair.Key);
+		if (!Mix.bEnabled) continue;
+		const FSFPResourceNodeAvailability& Live = Pair.Value;
+		auto ApplyLiveLimit = [&Mix](
+			const int32 Total,
+			const int32 Occupied,
+			bool FSFPResourceSourceMix::* LimitedMember,
+			int32 FSFPResourceSourceMix::* CountMember)
+		{
+			if (Mix.*LimitedMember) return;
+			Mix.*LimitedMember = true;
+			Mix.*CountMember = Mix.bUseOccupiedSources
+				? FMath::Max(0, Total)
+				: FMath::Max(0, Total - Occupied);
+		};
+		ApplyLiveLimit(Live.ImpureTotal, Live.ImpureOccupied,
+			&FSFPResourceSourceMix::bImpureLimited, &FSFPResourceSourceMix::ImpureCount);
+		ApplyLiveLimit(Live.NormalTotal, Live.NormalOccupied,
+			&FSFPResourceSourceMix::bNormalLimited, &FSFPResourceSourceMix::NormalCount);
+		ApplyLiveLimit(Live.PureTotal, Live.PureOccupied,
+			&FSFPResourceSourceMix::bPureLimited, &FSFPResourceSourceMix::PureCount);
+	}
+	return Effective;
+}
+
 FReply SSFPPlannerWindow::HandleCalculatePower()
 {
+	PowerCalculationError.Reset();
 	if (!Solver.IsValid())
 	{
 		StatusText = TEXT("Der Planner-Solver ist nicht verfügbar");
@@ -2083,9 +2212,14 @@ FReply SSFPPlannerWindow::HandleCalculatePower()
 		StatusText = TEXT("Förderband und Förderlift müssen für die Brennstoffkette ausgewählt sein");
 		return FReply::Handled();
 	}
+	// A missing factory plan must never block manual power and fuel planning.
+	if (bUseCurrentFactoryPowerDemand && LastFactoryPowerDemandMW <= KINDA_SMALL_NUMBER)
+	{
+		bUseCurrentFactoryPowerDemand = false;
+	}
 
 	FSFPPowerPlanRequest Request;
-	Request.TargetNetPowerMW = PowerTargetNetMW;
+	Request.TargetNetPowerMW = ResolvePowerTargetNetMW();
 	Request.ReservePercent = PowerReservePercent;
 	Request.bOnlyAvailable = bOnlyAvailable;
 	Request.GeneratorClassPath = SelectedPowerGenerator->ClassPath;
@@ -2095,6 +2229,7 @@ FReply SSFPPlannerWindow::HandleCalculatePower()
 	Request.FueledAlienPowerAugmenters = FueledAlienPowerAugmenters;
 	Request.RecipeOverrides = RecipeOverrides;
 	Request.MachineSettings = MachineSettingsOverrides;
+	Request.ResourceSourceMixes = BuildEffectiveResourceSourceMixes();
 	Request.EstimatedConnectionLengthMeters = EstimatedConnectionLengthMeters;
 	Request.SelectedConveyorClassPath = SelectedConveyor->Tier.ClassPath;
 	Request.SelectedConveyorLiftClassPath = SelectedConveyorLift->Tier.ClassPath;
@@ -2105,15 +2240,38 @@ FReply SSFPPlannerWindow::HandleCalculatePower()
 	const double SolveMilliseconds = (FPlatformTime::Seconds() - SolveStartTime) * 1000.0;
 	if (!Plan->bSuccess)
 	{
-		StatusText = FString::Printf(TEXT("Stromberechnung fehlgeschlagen: %s"), *Plan->ErrorMessage);
+		PowerCalculationError = Plan->ErrorMessage;
+		StatusText = FString::Printf(TEXT("Stromberechnung fehlgeschlagen: %s"), *PowerCalculationError);
 		return FReply::Handled();
 	}
+	if ((!Request.GeneratorClassPath.IsEmpty()
+			&& Plan->SelectedGeneratorClassPath != Request.GeneratorClassPath)
+		|| (!Request.FuelClassPath.IsEmpty()
+			&& Plan->SelectedFuelClassPath != Request.FuelClassPath))
+	{
+		PowerCalculationError = TEXT("Der berechnete Stromplan entspricht nicht der gewählten Generator-/Brennstoffkombination");
+		StatusText = FString::Printf(TEXT("Stromberechnung fehlgeschlagen: %s"), *PowerCalculationError);
+		return FReply::Handled();
+	}
+	// Live world counts are recalculated whenever the planner opens and are not
+	// persisted as manual caps in a personal or multiplayer plan.
+	Plan->ResourceSourceMixes = ResourceSourceMixes;
 
 	CarryForwardNodeCompletion(bCarryCurrentPlanProgress ? PreviousPlan.Get() : nullptr, *Plan);
 	if (MachineGuidanceState == 1) MachineGuidanceState = 2;
 	CurrentPlan = Plan;
 	bCarryCurrentPlanProgress = true;
 	bSharedPlanContentDirty = bSharedPlanMode && !ActiveSharedPlanFileName.IsEmpty();
+	SelectedTargets.Reset();
+	SelectedProduct.Reset();
+	if (TargetList.IsValid())
+	{
+		TargetList->RequestListRefresh();
+	}
+	if (ProductList.IsValid())
+	{
+		ProductList->ClearSelection();
+	}
 	if (GraphPanel.IsValid())
 	{
 		GraphPanel->SetPlan(Plan);
@@ -2124,7 +2282,7 @@ FReply SSFPPlannerWindow::HandleCalculatePower()
 	StatusText = BuildPlanStatusText(
 		*Plan,
 		SolveMilliseconds,
-		TEXT("Netto-Stromplan einschließlich Eigenverbrauch berechnet"));
+		TEXT("Strom- und Brennstoffproduktion einschließlich Eigenverbrauch berechnet"));
 	PersistCurrentPlan(false);
 	return FReply::Handled();
 }
@@ -2172,13 +2330,15 @@ void SSFPPlannerWindow::CalculateForTargets(
 		SelectedConveyorLift.IsValid() ? SelectedConveyorLift->Tier.ClassPath : FString(),
 		TMap<FString, double>(),
 		true,
-		MachineSettingsOverrides));
+		MachineSettingsOverrides,
+		BuildEffectiveResourceSourceMixes()));
 	const double SolveMilliseconds = (FPlatformTime::Seconds() - SolveStartTime) * 1000.0;
 	if (!Plan->bSuccess)
 	{
 		StatusText = FString::Printf(TEXT("Berechnung fehlgeschlagen: %s"), *Plan->ErrorMessage);
 		return;
 	}
+	Plan->ResourceSourceMixes = ResourceSourceMixes;
 	CarryForwardNodeCompletion(bCarryCurrentPlanProgress ? PreviousPlan.Get() : nullptr, *Plan);
 
 	for (const FSFPPlanTarget& SolvedTarget : Plan->Targets)
@@ -2206,6 +2366,7 @@ void SSFPPlannerWindow::CalculateForTargets(
 	}
 	if (MachineGuidanceState == 1) MachineGuidanceState = 2;
 	CurrentPlan = Plan;
+	LastFactoryPowerDemandMW = FMath::Max(0.0, Plan->TotalBasePowerMW);
 	bCarryCurrentPlanProgress = true;
 	bSharedPlanContentDirty = bSharedPlanMode && !ActiveSharedPlanFileName.IsEmpty();
 	RefreshRecipeChoices(Plan);
@@ -2732,11 +2893,288 @@ TSharedRef<ITableRow> SSFPPlannerWindow::HandleGenerateRecipeChoiceRow(
 {
 	TSharedRef<SVerticalBox> Body = SNew(SVerticalBox);
 	if (!Row.IsValid()) return SNew(STableRow<TSharedPtr<FSFPRecipeChoiceRow>>, OwnerTable)[Body];
+	auto AppendMixedSourceControls = [this](
+		const TSharedRef<SVerticalBox>& Container,
+		const TSharedPtr<FSFPRecipeChoiceRow>& ExtractionRow)
+	{
+		if (!ExtractionRow.IsValid() || !ExtractionRow->Selected.IsValid()
+			|| ExtractionRow->Selected->Category != TEXT("Direktabbau / Förderung"))
+		{
+			return;
+		}
+		TSet<FString> AvailablePurities;
+		for (const TSharedPtr<FSFPRecipeOption>& Option : ExtractionRow->Options)
+		{
+			if (Option.IsValid()
+				&& Option->Category == TEXT("Direktabbau / Förderung")
+				&& Option->SourceName == ExtractionRow->Selected->SourceName
+				&& Option->MachineClassPath == ExtractionRow->Selected->MachineClassPath
+				&& Option->ModulesLabel == ExtractionRow->Selected->ModulesLabel
+				&& Option->FluidLabel == ExtractionRow->Selected->FluidLabel
+				&& (Option->bAvailable || !bOnlyAvailable))
+			{
+				AvailablePurities.Add(Option->Purity);
+			}
+		}
+		if (!AvailablePurities.Contains(TEXT("Unrein"))
+			|| !AvailablePurities.Contains(TEXT("Normal"))
+			|| !AvailablePurities.Contains(TEXT("Rein")))
+		{
+			return;
+		}
+
+		const FString MixKey = ExtractionRow->Selected->SourceItemClassPath.IsEmpty()
+			? ExtractionRow->ItemClassPath
+			: ExtractionRow->Selected->SourceItemClassPath;
+		const FSFPResourceSourceMix* ExistingMix = ResourceSourceMixes.Find(MixKey);
+		const bool bMixed = ExistingMix == nullptr || ExistingMix->bEnabled;
+		auto RequiredCountForPurity = [this, ExtractionRow](const FString& Purity)
+		{
+			if (!CurrentPlan.IsValid()) return 0;
+			TSet<FString> RecipePaths;
+			for (const TSharedPtr<FSFPRecipeOption>& Option : ExtractionRow->Options)
+			{
+				if (Option.IsValid()
+					&& Option->Category == TEXT("Direktabbau / Förderung")
+					&& Option->Purity == Purity
+					&& Option->SourceName == ExtractionRow->Selected->SourceName
+					&& Option->MachineClassPath == ExtractionRow->Selected->MachineClassPath
+					&& Option->ModulesLabel == ExtractionRow->Selected->ModulesLabel
+					&& Option->FluidLabel == ExtractionRow->Selected->FluidLabel)
+				{
+					RecipePaths.Add(Option->RecipeClassPath);
+				}
+			}
+			int32 RequiredCount = 0;
+			for (const FSFPPlanNode& Node : CurrentPlan->Nodes)
+			{
+				if (Node.Type == ESFPPlanNodeType::Machine && RecipePaths.Contains(Node.RecipeClassPath))
+				{
+					RequiredCount += FMath::Max(0, Node.BuiltMachineCount);
+				}
+			}
+			return RequiredCount;
+		};
+		Container->AddSlot().AutoHeight().Padding(3, 6, 3, 2)
+		[
+			SNew(SCheckBox)
+			.IsChecked_Lambda([this, MixKey]()
+			{
+				const FSFPResourceSourceMix* Mix = ResourceSourceMixes.Find(MixKey);
+				return (Mix == nullptr || Mix->bEnabled)
+					? ECheckBoxState::Checked : ECheckBoxState::Unchecked;
+			})
+			.OnCheckStateChanged_Lambda([this, MixKey](const ECheckBoxState State)
+			{
+				FSFPResourceSourceMix& Mix = ResourceSourceMixes.FindOrAdd(MixKey);
+				Mix.bEnabled = State == ECheckBoxState::Checked;
+				StatusText = TEXT("Vorkommensmix geändert – bitte Produktionsplan neu berechnen.");
+				bCarryCurrentPlanProgress = false;
+				if (RecipeChoiceList.IsValid()) RecipeChoiceList->RebuildList();
+			})
+			[
+				SNew(STextBlock).Text(SFPLocalization::Text(TEXT("Reinheiten automatisch verteilen")))
+			]
+		];
+		if (!bMixed)
+		{
+			return;
+		}
+		Container->AddSlot().AutoHeight().Padding(3, 1, 3, 3)
+		[
+			SNew(STextBlock)
+			.AutoWrapText(true)
+			.Text(SFPLocalization::Text(TEXT("Der Planner zeigt den benötigten Node-Mix. Begrenze nur Reinheiten, die dir nicht ausreichend zur Verfügung stehen; 0 schließt diese Reinheit aus.")))
+		];
+		const FSFPResourceNodeAvailability* LiveAvailability = ResourceNodeAvailability.Find(MixKey);
+		if (LiveAvailability != nullptr)
+		{
+			Container->AddSlot().AutoHeight().Padding(3, 1, 3, 4)
+			[
+				SNew(SCheckBox)
+				.IsChecked_Lambda([this, MixKey]()
+				{
+					const FSFPResourceSourceMix* Mix = ResourceSourceMixes.Find(MixKey);
+					return Mix != nullptr && Mix->bUseOccupiedSources
+						? ECheckBoxState::Checked : ECheckBoxState::Unchecked;
+				})
+				.OnCheckStateChanged_Lambda([this, MixKey](const ECheckBoxState State)
+				{
+					FSFPResourceSourceMix& Mix = ResourceSourceMixes.FindOrAdd(MixKey);
+					Mix.bEnabled = true;
+					Mix.bUseOccupiedSources = State == ECheckBoxState::Checked;
+					bCarryCurrentPlanProgress = false;
+					StatusText = TEXT("Verfügbare Rohstoffquellen geändert – bitte neu berechnen.");
+					if (RecipeChoiceList.IsValid()) RecipeChoiceList->RebuildList();
+				})
+				[
+					SNew(STextBlock).Text(SFPLocalization::Text(TEXT("Bereits belegte Quellen mit einbeziehen")))
+				]
+			];
+		}
+		else if (!ResourceNodeInventoryError.IsEmpty())
+		{
+			Container->AddSlot().AutoHeight().Padding(3, 1, 3, 4)
+			[
+				SNew(STextBlock)
+				.AutoWrapText(true)
+				.ColorAndOpacity(SFPTheme::Orange)
+				.Text(FText::FromString(
+					SFPLocalization::Text(TEXT("Weltinventur nicht verfügbar")).ToString()
+					+ TEXT(": ") + ResourceNodeInventoryError))
+			];
+		}
+		TSharedRef<SHorizontalBox> Counts = SNew(SHorizontalBox);
+		auto AddCount = [this, Counts, MixKey, RequiredCountForPurity](
+			const FString& Label,
+			int32 FSFPResourceSourceMix::* CountMember,
+			bool FSFPResourceSourceMix::* LimitedMember)
+		{
+			const int32 RequiredCount = RequiredCountForPurity(Label);
+			const FSFPResourceNodeAvailability* Availability = ResourceNodeAvailability.Find(MixKey);
+			const FSFPResourceSourceMix* CurrentMix = ResourceSourceMixes.Find(MixKey);
+			const int32 TotalCount = Availability != nullptr ? Availability->TotalForPurity(Label) : 0;
+			const int32 OccupiedCount = Availability != nullptr ? Availability->OccupiedForPurity(Label) : 0;
+			const int32 FreeCount = Availability != nullptr ? Availability->FreeForPurity(Label) : 0;
+			const bool bManualLimit = CurrentMix != nullptr && CurrentMix->*LimitedMember;
+			const bool bIncludeOccupied = CurrentMix != nullptr && CurrentMix->bUseOccupiedSources;
+			const int32 PlannedAvailable = bManualLimit
+				? FMath::Max(0, CurrentMix->*CountMember)
+				: (bIncludeOccupied ? TotalCount : FreeCount);
+			const int32 MissingCount = Availability != nullptr
+				? FMath::Max(0, RequiredCount - PlannedAvailable) : 0;
+			Counts->AddSlot().FillWidth(1.0f).Padding(0, 0, 6, 0)
+			[
+				SNew(SVerticalBox)
+				+ SVerticalBox::Slot().AutoHeight()
+				[
+					SNew(STextBlock).Text(SFPLocalization::Text(Label))
+				]
+				+ SVerticalBox::Slot().AutoHeight().Padding(0, 1, 0, 1)
+				[
+					SNew(STextBlock)
+					.Text(FText::FromString(Availability != nullptr
+						? FString::Printf(
+							TEXT("%s %d | %s %d | %s %d"),
+							*SFPLocalization::Text(TEXT("Gesamt")).ToString(), TotalCount,
+							*SFPLocalization::Text(TEXT("Besetzt")).ToString(), OccupiedCount,
+							*SFPLocalization::Text(TEXT("Frei")).ToString(), FreeCount)
+						: FString::Printf(
+							TEXT("%s: %d"),
+							*SFPLocalization::Text(TEXT("Benötigt")).ToString(), RequiredCount)))
+					.ColorAndOpacity(SFPTheme::MutedText)
+				]
+				+ SVerticalBox::Slot().AutoHeight().Padding(0, 1, 0, 1)
+				[
+					SNew(STextBlock)
+					.Visibility(Availability != nullptr ? EVisibility::Visible : EVisibility::Collapsed)
+					.Text(FText::FromString(FString::Printf(
+						TEXT("%s %d | %s %d | %s %d"),
+						*SFPLocalization::Text(TEXT("Benötigt")).ToString(), RequiredCount,
+						*SFPLocalization::Text(TEXT("Verfügbar")).ToString(), PlannedAvailable,
+						*SFPLocalization::Text(TEXT("Fehlt")).ToString(), MissingCount)))
+					.ColorAndOpacity(SFPTheme::Cyan)
+				]
+				+ SVerticalBox::Slot().AutoHeight()
+				[
+					SNew(SCheckBox)
+					.IsChecked_Lambda([this, MixKey, LimitedMember]()
+					{
+						const FSFPResourceSourceMix* Mix = ResourceSourceMixes.Find(MixKey);
+						return Mix != nullptr && Mix->*LimitedMember
+							? ECheckBoxState::Checked : ECheckBoxState::Unchecked;
+					})
+					.OnCheckStateChanged_Lambda([this, MixKey, CountMember, LimitedMember, RequiredCount](const ECheckBoxState State)
+					{
+						FSFPResourceSourceMix& Mix = ResourceSourceMixes.FindOrAdd(MixKey);
+						Mix.bEnabled = true;
+						Mix.*LimitedMember = State == ECheckBoxState::Checked;
+						if (Mix.*LimitedMember)
+						{
+							Mix.*CountMember = RequiredCount;
+						}
+						StatusText = TEXT("Vorkommensmix geändert – bitte Produktionsplan neu berechnen.");
+						bCarryCurrentPlanProgress = false;
+					})
+					[
+						SNew(STextBlock).Text(SFPLocalization::Text(TEXT("Verfügbarkeit begrenzen")))
+					]
+				]
+				+ SVerticalBox::Slot().AutoHeight()
+				[
+					SNew(SNumericEntryBox<int32>)
+					.Visibility_Lambda([this, MixKey, LimitedMember]()
+					{
+						const FSFPResourceSourceMix* Mix = ResourceSourceMixes.Find(MixKey);
+						return Mix != nullptr && Mix->*LimitedMember
+							? EVisibility::Visible : EVisibility::Collapsed;
+					})
+					.AllowSpin(true)
+					.MinValue(0)
+					.MaxValue(100000)
+					.MinSliderValue(0)
+					.MaxSliderValue(100)
+					.Value_Lambda([this, MixKey, CountMember]() -> TOptional<int32>
+					{
+						const FSFPResourceSourceMix* Mix = ResourceSourceMixes.Find(MixKey);
+						return Mix != nullptr ? TOptional<int32>(Mix->*CountMember) : TOptional<int32>(0);
+					})
+					.OnValueChanged_Lambda([this, MixKey, CountMember](const int32 NewValue)
+					{
+						FSFPResourceSourceMix& Mix = ResourceSourceMixes.FindOrAdd(MixKey);
+						Mix.bEnabled = true;
+						Mix.*CountMember = FMath::Clamp(NewValue, 0, 100000);
+						StatusText = TEXT("Vorkommensmix geändert – bitte Produktionsplan neu berechnen.");
+						bCarryCurrentPlanProgress = false;
+					})
+				]
+			];
+		};
+		AddCount(TEXT("Rein"), &FSFPResourceSourceMix::PureCount, &FSFPResourceSourceMix::bPureLimited);
+		AddCount(TEXT("Normal"), &FSFPResourceSourceMix::NormalCount, &FSFPResourceSourceMix::bNormalLimited);
+		AddCount(TEXT("Unrein"), &FSFPResourceSourceMix::ImpureCount, &FSFPResourceSourceMix::bImpureLimited);
+		Container->AddSlot().AutoHeight().Padding(3, 1, 3, 5)[Counts];
+	};
+	auto UsesAutomaticPurityMix = [this](const TSharedPtr<FSFPRecipeChoiceRow>& ExtractionRow)
+	{
+		if (!ExtractionRow.IsValid() || !ExtractionRow->Selected.IsValid()
+			|| ExtractionRow->Selected->Category != TEXT("Direktabbau / Förderung"))
+		{
+			return false;
+		}
+
+		TSet<FString> AvailablePurities;
+		for (const TSharedPtr<FSFPRecipeOption>& Option : ExtractionRow->Options)
+		{
+			if (Option.IsValid()
+				&& Option->Category == TEXT("Direktabbau / Förderung")
+				&& Option->SourceName == ExtractionRow->Selected->SourceName
+				&& Option->MachineClassPath == ExtractionRow->Selected->MachineClassPath
+				&& Option->ModulesLabel == ExtractionRow->Selected->ModulesLabel
+				&& Option->FluidLabel == ExtractionRow->Selected->FluidLabel
+				&& (Option->bAvailable || !bOnlyAvailable))
+			{
+				AvailablePurities.Add(Option->Purity);
+			}
+		}
+		if (!AvailablePurities.Contains(TEXT("Unrein"))
+			|| !AvailablePurities.Contains(TEXT("Normal"))
+			|| !AvailablePurities.Contains(TEXT("Rein")))
+		{
+			return false;
+		}
+
+		const FString MixKey = ExtractionRow->Selected->SourceItemClassPath.IsEmpty()
+			? ExtractionRow->ItemClassPath
+			: ExtractionRow->Selected->SourceItemClassPath;
+		const FSFPResourceSourceMix* Mix = ResourceSourceMixes.Find(MixKey);
+		return Mix == nullptr || Mix->bEnabled;
+	};
 	Body->AddSlot().AutoHeight().Padding(3, 6)
 	[
 		SNew(STextBlock).Text(FText::FromString(
 			SFPLocalization::Text(TEXT("Ausgabe")).ToString() + TEXT(": ")
-			+ SFPLocalization::Text(Row->ItemName).ToString()))
+			+ CurrentPlannerItemName(Row->ItemName, Row->ItemClassPath)))
 	];
 	Body->AddSlot().AutoHeight().Padding(3, 2)
 	[
@@ -2749,7 +3187,9 @@ TSharedRef<ITableRow> SSFPPlannerWindow::HandleGenerateRecipeChoiceRow(
 	];
 	using FField = FString FSFPRecipeOption::*;
 	TArray<FField> Fields;
+	TArray<FString> Labels;
 	Fields.Add(&FSFPRecipeOption::Category);
+	Labels.Add(TEXT("Bezugsweg"));
 	const bool bExtraction = Row->Selected.IsValid() && Row->Selected->Category == TEXT("Direktabbau / Förderung");
 	if (bExtraction)
 	{
@@ -2761,18 +3201,24 @@ TSharedRef<ITableRow> SSFPPlannerWindow::HandleGenerateRecipeChoiceRow(
 				: TEXT("Reiner Rohstoffabbau: Der Miner liefert den Rohstoff unverarbeitet. Die Auswahl unten gilt für diese Ausgabe.")))
 		];
 		Fields.Add(&FSFPRecipeOption::SourceName);
+		Labels.Add(TEXT("Rohstoff am Eingang"));
 		Fields.Add(&FSFPRecipeOption::MachineName);
-		Fields.Add(&FSFPRecipeOption::Purity);
+		Labels.Add(TEXT("Miner / Förderanlage"));
+		if (!UsesAutomaticPurityMix(Row))
+		{
+			Fields.Add(&FSFPRecipeOption::Purity);
+			Labels.Add(TEXT("Reinheit"));
+		}
 		Fields.Add(&FSFPRecipeOption::ModulesLabel);
+		Labels.Add(TEXT("Module / Bohrkopf"));
 		Fields.Add(&FSFPRecipeOption::FluidLabel);
+		Labels.Add(TEXT("Betriebsflüssigkeit"));
 	}
 	else
 	{
 		Fields.Add(&FSFPRecipeOption::DisplayName);
+		Labels.Add(TEXT("Rezept"));
 	}
-	const TArray<FString> Labels = bExtraction
-		? TArray<FString>{TEXT("Bezugsweg"), TEXT("Rohstoff am Eingang"), TEXT("Miner / Förderanlage"), TEXT("Reinheit"), TEXT("Module / Bohrkopf"), TEXT("Betriebsflüssigkeit")}
-		: TArray<FString>{TEXT("Bezugsweg"), TEXT("Rezept"), TEXT("Produktionsmaschine")};
 	for (int32 FieldIndex = 0; FieldIndex < Fields.Num(); ++FieldIndex)
 	{
 		const FField Field = Fields[FieldIndex];
@@ -2845,6 +3291,10 @@ TSharedRef<ITableRow> SSFPPlannerWindow::HandleGenerateRecipeChoiceRow(
 			return SFPLocalization::Text(Locked + Row->Selected->ConfigurationDetail);
 		})
 	];
+	if (bExtraction)
+	{
+		AppendMixedSourceControls(Body, Row);
+	}
 	for (const TSharedPtr<FSFPRecipeChoiceRow>& RawRow : Row->GroupedRawExtractions)
 	{
 		if (!RawRow.IsValid() || !RawRow->Selected.IsValid()) continue;
@@ -2853,7 +3303,7 @@ TSharedRef<ITableRow> SSFPPlannerWindow::HandleGenerateRecipeChoiceRow(
 			SNew(STextBlock)
 			.Text(FText::FromString(
 				SFPLocalization::Text(TEXT("Rohstoff & Miner")).ToString() + TEXT(": ")
-				+ SFPLocalization::Text(RawRow->ItemName).ToString()))
+				+ CurrentPlannerItemName(RawRow->ItemName, RawRow->ItemClassPath)))
 			.Font(FCoreStyle::GetDefaultFontStyle(TEXT("Bold"), 10))
 		];
 		Body->AddSlot().AutoHeight().Padding(3, 2, 3, 6)
@@ -2862,20 +3312,22 @@ TSharedRef<ITableRow> SSFPPlannerWindow::HandleGenerateRecipeChoiceRow(
 				TEXT("Reiner Rohstoffabbau: Der Miner liefert den Rohstoff unverarbeitet. Die Auswahl unten gilt für diese Ausgabe.")))
 		];
 		TArray<FField> RawFields;
+		TArray<FString> RawLabels;
 		RawFields.Add(&FSFPRecipeOption::Category);
+		RawLabels.Add(TEXT("Bezugsweg"));
 		RawFields.Add(&FSFPRecipeOption::SourceName);
+		RawLabels.Add(TEXT("Rohstoff am Eingang"));
 		RawFields.Add(&FSFPRecipeOption::MachineName);
-		RawFields.Add(&FSFPRecipeOption::Purity);
+		RawLabels.Add(TEXT("Miner / Förderanlage"));
+		if (!UsesAutomaticPurityMix(RawRow))
+		{
+			RawFields.Add(&FSFPRecipeOption::Purity);
+			RawLabels.Add(TEXT("Reinheit"));
+		}
 		RawFields.Add(&FSFPRecipeOption::ModulesLabel);
+		RawLabels.Add(TEXT("Module / Bohrkopf"));
 		RawFields.Add(&FSFPRecipeOption::FluidLabel);
-		const TArray<FString> RawLabels = {
-			TEXT("Bezugsweg"),
-			TEXT("Rohstoff am Eingang"),
-			TEXT("Miner / Förderanlage"),
-			TEXT("Reinheit"),
-			TEXT("Module / Bohrkopf"),
-			TEXT("Betriebsflüssigkeit")
-		};
+		RawLabels.Add(TEXT("Betriebsflüssigkeit"));
 		for (int32 FieldIndex = 0; FieldIndex < RawFields.Num(); ++FieldIndex)
 		{
 			const FField Field = RawFields[FieldIndex];
@@ -2961,6 +3413,7 @@ TSharedRef<ITableRow> SSFPPlannerWindow::HandleGenerateRecipeChoiceRow(
 				return SFPLocalization::Text(Locked + RawRow->Selected->ConfigurationDetail);
 			})
 		];
+		AppendMixedSourceControls(Body, RawRow);
 	}
 	Body->AddSlot().AutoHeight().Padding(3, 2, 3, 8)
 	[
@@ -2988,6 +3441,7 @@ TSharedRef<ITableRow> SSFPPlannerWindow::HandleGenerateRecipeChoiceRow(
 FReply SSFPPlannerWindow::HandleResetRecipeChoices()
 {
 	RecipeOverrides.Reset();
+	ResourceSourceMixes.Reset();
 	if (CurrentPlan.IsValid() && CurrentPlan->bPowerProductionPlan)
 	{
 		StatusText = TEXT("Automatische Rezeptwahl aktiviert");
@@ -3135,33 +3589,11 @@ void SSFPPlannerWindow::CaptureInputBudgetsToPlan()
 		return;
 	}
 	CurrentPlan->AvailableInputRates.Reset();
-	CurrentPlan->bOnlyAvailableRecipes = bOnlyAvailable;
-	if (CurrentPlan->bPowerProductionPlan)
-	{
-		CurrentPlan->RequestedNetPowerMW = PowerTargetNetMW;
-		CurrentPlan->PowerReservePercent = PowerReservePercent;
-		CurrentPlan->ConfiguredGeneratorClockPercent = PowerGeneratorClockPercent;
-		CurrentPlan->PassiveAlienPowerAugmenters = PassiveAlienPowerAugmenters;
-		CurrentPlan->FueledAlienPowerAugmenters = FueledAlienPowerAugmenters;
-		CurrentPlan->RequestedGeneratorClassPath = SelectedPowerGenerator.IsValid()
-			? SelectedPowerGenerator->ClassPath
-			: FString();
-		CurrentPlan->RequestedFuelClassPath = SelectedPowerFuel.IsValid()
-			? SelectedPowerFuel->ClassPath
-			: FString();
-	}
-	if (SelectedConveyor.IsValid())
-	{
-		CurrentPlan->SelectedConveyorClassPath = SelectedConveyor->Tier.ClassPath;
-		CurrentPlan->SelectedConveyorDisplayName = SelectedConveyor->Tier.DisplayName;
-		CurrentPlan->SelectedConveyorCapacityPerMinute = SelectedConveyor->Tier.CapacityPerMinute;
-	}
-	if (SelectedConveyorLift.IsValid())
-	{
-		CurrentPlan->SelectedConveyorLiftClassPath = SelectedConveyorLift->Tier.ClassPath;
-		CurrentPlan->SelectedConveyorLiftDisplayName = SelectedConveyorLift->Tier.DisplayName;
-		CurrentPlan->SelectedConveyorLiftCapacityPerMinute = SelectedConveyorLift->Tier.CapacityPerMinute;
-	}
+	// This function is also called by automatic persistence while closing the
+	// planner.  Never copy pending UI choices into an already calculated result:
+	// doing so made an old 500 MW fuel-generator result look as if it had been
+	// recalculated for a newly selected 2,500 MW nuclear generator.  Solver input
+	// fields and transport choices are committed only by a successful solve.
 	for (const TSharedPtr<FSFPInputBudgetOption>& Input : InputBudgets)
 	{
 		if (Input.IsValid())
@@ -3562,6 +3994,10 @@ void SSFPPlannerWindow::HandleNodeCompletionChanged(const int32 NodeId, const bo
 
 FReply SSFPPlannerWindow::HandleSelectTab(const int32 TabIndex)
 {
+	if (TabIndex == PowerTabIndex && CurrentPlan.IsValid() && !CurrentPlan->bPowerProductionPlan)
+	{
+		LastFactoryPowerDemandMW = FMath::Max(0.0, CurrentPlan->TotalBasePowerMW);
+	}
 	ActiveTabIndex = FMath::Clamp(TabIndex, PlanningTabIndex, GraphTabIndex);
 	if (TabSwitcher.IsValid())
 	{
@@ -3592,8 +4028,72 @@ TOptional<double> SSFPPlannerWindow::GetPowerTargetNetMW() const
 
 void SSFPPlannerWindow::HandlePowerTargetNetMWChanged(const double NewValue)
 {
+	PowerCalculationError.Reset();
 	PowerTargetNetMW = FMath::Max(0.1, NewValue);
 	StatusText = TEXT("Nettoleistungsziel geändert – Stromplan neu berechnen");
+}
+
+ECheckBoxState SSFPPlannerWindow::GetUseFactoryPowerDemandState() const
+{
+	return bUseCurrentFactoryPowerDemand && LastFactoryPowerDemandMW > KINDA_SMALL_NUMBER
+		? ECheckBoxState::Checked
+		: ECheckBoxState::Unchecked;
+}
+
+void SSFPPlannerWindow::HandleUseFactoryPowerDemandChanged(const ECheckBoxState NewState)
+{
+	bUseCurrentFactoryPowerDemand = NewState == ECheckBoxState::Checked;
+	if (bUseCurrentFactoryPowerDemand)
+	{
+		if (CurrentPlan.IsValid() && !CurrentPlan->bPowerProductionPlan)
+		{
+			LastFactoryPowerDemandMW = FMath::Max(0.0, CurrentPlan->TotalBasePowerMW);
+		}
+		if (LastFactoryPowerDemandMW > KINDA_SMALL_NUMBER)
+		{
+			StatusText = TEXT("Strombedarf des aktuellen Fabrikplans übernommen – Brennstoffproduktion berechnen");
+			return;
+		}
+		bUseCurrentFactoryPowerDemand = false;
+		StatusText = TEXT("Kein berechneter Fabrikplan vorhanden – manuelles Nettoleistungsziel bleibt aktiv");
+		return;
+	}
+	StatusText = TEXT("Manuelles Nettoleistungsziel aktiviert");
+}
+
+FText SSFPPlannerWindow::GetFactoryPowerDemandText() const
+{
+	if (LastFactoryPowerDemandMW <= KINDA_SMALL_NUMBER)
+	{
+		return SFPLocalization::Text(TEXT("Noch kein berechneter Fabrikplan verfügbar. Das manuelle Nettoleistungsziel ist aktiv."));
+	}
+	const FString FormattedDemand = FSFPNumberFormatting::Decimal(LastFactoryPowerDemandMW, 2);
+	if (bUseCurrentFactoryPowerDemand)
+	{
+		const FString ActiveDetail = SFPLocalization::IsGerman()
+			? FString::Printf(
+				TEXT("Aktiver Zielwert: %s MW aus dem Fabrikplan. Das manuelle Nettoziel wird ersetzt; Reserve und Eigenverbrauch der Brennstoffherstellung kommen zusätzlich hinzu."),
+				*FormattedDemand)
+			: FString::Printf(
+				TEXT("Active target: %s MW from the factory plan. This replaces the manual net target; reserve and fuel-production self-consumption are added automatically."),
+				*FormattedDemand);
+		return FText::FromString(ActiveDetail);
+	}
+	const FString Detail = SFPLocalization::IsGerman()
+		? FString::Printf(
+			TEXT("Verfügbarer Fabrikbedarf: %s MW. Aktivieren, um damit das manuelle Nettoziel zu ersetzen."),
+			*FormattedDemand)
+		: FString::Printf(
+			TEXT("Available factory demand: %s MW. Enable this option to replace the manual net target."),
+			*FormattedDemand);
+	return FText::FromString(Detail);
+}
+
+double SSFPPlannerWindow::ResolvePowerTargetNetMW() const
+{
+	return bUseCurrentFactoryPowerDemand && LastFactoryPowerDemandMW > KINDA_SMALL_NUMBER
+		? LastFactoryPowerDemandMW
+		: PowerTargetNetMW;
 }
 
 TOptional<double> SSFPPlannerWindow::GetPowerReservePercent() const
@@ -3603,6 +4103,7 @@ TOptional<double> SSFPPlannerWindow::GetPowerReservePercent() const
 
 void SSFPPlannerWindow::HandlePowerReservePercentChanged(const double NewValue)
 {
+	PowerCalculationError.Reset();
 	PowerReservePercent = FMath::Clamp(NewValue, 0.0, 500.0);
 	StatusText = TEXT("Leistungsreserve geändert – Stromplan neu berechnen");
 }
@@ -3752,7 +4253,18 @@ FText SSFPPlannerWindow::GetPowerSummaryText() const
 	}
 
 	const FSFPPlanResult& Plan = *CurrentPlan;
-	FString Summary = FString::Printf(
+	FString Summary;
+	if (!PowerCalculationError.IsEmpty())
+	{
+		Summary += FString::Printf(
+			TEXT("LETZTE BERECHNUNG FEHLGESCHLAGEN\n%s\nDer darunter angezeigte Stromplan ist das letzte erfolgreiche Ergebnis.\n\n"),
+			*PowerCalculationError);
+	}
+	else if (IsPowerPlanRequestDirty())
+	{
+		Summary += TEXT("ÄNDERUNGEN NOCH NICHT BERECHNET\nDer darunter angezeigte Stromplan ist das letzte erfolgreiche Ergebnis. Strom- und Brennstoffproduktion neu berechnen, um die aktuelle Auswahl zu übernehmen.\n\n");
+	}
+	Summary += FString::Printf(
 		TEXT("NETZBILANZ\n"
 			"• Zielverbrauch: %s MW\n"
 			"• Bruttoerzeugung: %s MW\n"
@@ -3879,6 +4391,26 @@ FText SSFPPlannerWindow::GetPowerSummaryText() const
 			"• Vollständige Maschinen-, Transport-, Baukosten- und Rezeptdetails stehen in den übrigen Tabs."),
 		*FSFPNumberFormatting::Decimal(Plan.SelfConsumptionPowerMW, 2));
 	return SFPLocalization::Text(Summary);
+}
+
+bool SSFPPlannerWindow::IsPowerPlanRequestDirty() const
+{
+	if (!CurrentPlan.IsValid() || !CurrentPlan->bPowerProductionPlan)
+	{
+		return false;
+	}
+	const FString GeneratorPath = SelectedPowerGenerator.IsValid()
+		? SelectedPowerGenerator->ClassPath : FString();
+	const FString FuelPath = SelectedPowerFuel.IsValid()
+		? SelectedPowerFuel->ClassPath : FString();
+	return !FMath::IsNearlyEqual(CurrentPlan->RequestedNetPowerMW, ResolvePowerTargetNetMW(), 0.001)
+		|| !FMath::IsNearlyEqual(CurrentPlan->PowerReservePercent, PowerReservePercent, 0.001)
+		|| CurrentPlan->RequestedGeneratorClassPath != GeneratorPath
+		|| CurrentPlan->RequestedFuelClassPath != FuelPath
+		|| !FMath::IsNearlyEqual(CurrentPlan->ConfiguredGeneratorClockPercent, PowerGeneratorClockPercent, 0.001)
+		|| CurrentPlan->PassiveAlienPowerAugmenters != PassiveAlienPowerAugmenters
+		|| CurrentPlan->FueledAlienPowerAugmenters != FueledAlienPowerAugmenters
+		|| CurrentPlan->bOnlyAvailableRecipes != bOnlyAvailable;
 }
 
 FText SSFPPlannerWindow::GetMachineSummaryText() const
@@ -4589,6 +5121,14 @@ void SSFPPlannerWindow::ApplyPlanToUI(const TSharedPtr<FSFPPlanResult>& Plan)
 
 	MachineGuidanceState = 0;
 	CurrentPlan = Plan;
+	if (Plan->bPowerProductionPlan)
+	{
+		bUseCurrentFactoryPowerDemand = false;
+	}
+	else
+	{
+		LastFactoryPowerDemandMW = FMath::Max(0.0, Plan->TotalBasePowerMW);
+	}
 	bCarryCurrentPlanProgress = true;
 	bOnlyAvailable = Plan->bOnlyAvailableRecipes;
 	RefreshProducts();
@@ -4617,6 +5157,7 @@ void SSFPPlannerWindow::ApplyPlanToUI(const TSharedPtr<FSFPPlanResult>& Plan)
 		LoadedMaxClock.IsSet() ? LoadedMaxClock.GetValue() : 250.0);
 	RecipeOverrides = Plan->RecipeOverrides;
 	MachineSettingsOverrides = Plan->MachineSettings;
+	ResourceSourceMixes = Plan->ResourceSourceMixes;
     bInputPlanning = Plan->bInputPlanning;
     SelectedSupplies.Reset();
     for (const auto& Supply : Plan->Supplies) SelectedSupplies.Add(MakeShared<FSFPPlanSupply>(Supply));
@@ -4624,6 +5165,11 @@ void SSFPPlannerWindow::ApplyPlanToUI(const TSharedPtr<FSFPPlanResult>& Plan)
 	SelectedTargets.Reset();
 	if (Plan->bPowerProductionPlan)
 	{
+		SelectedProduct.Reset();
+		if (ProductList.IsValid())
+		{
+			ProductList->ClearSelection();
+		}
 		if (TargetList.IsValid())
 		{
 			TargetList->RequestListRefresh();

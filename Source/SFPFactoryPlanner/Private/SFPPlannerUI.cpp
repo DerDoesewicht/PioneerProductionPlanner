@@ -8,6 +8,7 @@
 #include "SFPFactoryPlanner.h"
 #include "SFPLocalization.h"
 #include "SFPPlannerSolver.h"
+#include "SFPPlannerRemoteCallObject.h"
 #include "TimerManager.h"
 #include "Widgets/SSFPPlannerWindow.h"
 
@@ -172,6 +173,11 @@ bool FSFPPlannerUI::Open(AFGPlayerController* PlayerController, FString& OutErro
 	State.bPreviousMouseCursor = PlayerController->bShowMouseCursor;
 	OpenWindows.Add(Key, State);
 	GEngine->GameViewport->AddViewportWidgetContent(Window.ToSharedRef(), 10000);
+	FString ResourceInventoryError;
+	if (!USFPPlannerRemoteCallObject::RequestResourceNodeInventory(PlayerController, ResourceInventoryError))
+	{
+		Window->ReceiveResourceNodeInventory(FString(), ResourceInventoryError);
+	}
 
 	PlayerController->SetShowMouseCursor(true);
 	FInputModeUIOnly InputMode;
@@ -274,6 +280,17 @@ void FSFPPlannerUI::ReceiveSharedPlanDeleteResult(
 	if (const TSharedPtr<SSFPPlannerWindow> Window = FindOpenWindow(PlayerController); Window.IsValid())
 	{
 		Window->ReceiveSharedPlanDeleteResult(bSuccess, FileName, PlanName, Error);
+	}
+}
+
+void FSFPPlannerUI::ReceiveResourceNodeInventory(
+	AFGPlayerController* PlayerController,
+	const FString& InventoryJson,
+	const FString& Error)
+{
+	if (const TSharedPtr<SSFPPlannerWindow> Window = FindOpenWindow(PlayerController); Window.IsValid())
+	{
+		Window->ReceiveResourceNodeInventory(InventoryJson, Error);
 	}
 }
 

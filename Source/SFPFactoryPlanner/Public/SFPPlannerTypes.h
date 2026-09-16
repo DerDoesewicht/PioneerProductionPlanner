@@ -63,6 +63,22 @@ struct FSFPMachinePlanSettings
 	FString FuelClassPath;
 };
 
+/** Available deposits for one raw resource when more than one purity is used. */
+struct FSFPResourceSourceMix
+{
+	/** Automatic purity allocation is the default for every complete purity family. */
+	bool bEnabled = true;
+	/** Include nodes that already have an extractor when deriving live-world limits. */
+	bool bUseOccupiedSources = false;
+	/** False means unlimited/automatic availability; true makes the corresponding count a hard cap. */
+	bool bImpureLimited = false;
+	bool bNormalLimited = false;
+	bool bPureLimited = false;
+	int32 ImpureCount = 0;
+	int32 NormalCount = 0;
+	int32 PureCount = 0;
+};
+
 struct FSFPPlannerRecipe
 {
 	TSubclassOf<UFGRecipe> RecipeClass;
@@ -287,6 +303,8 @@ struct FSFPPowerPlanRequest
 	int32 FueledAlienPowerAugmenters = 0;
 	TMap<FString, FString> RecipeOverrides;
 	TMap<FString, FSFPMachinePlanSettings> MachineSettings;
+	/** Mixed impure/normal/pure deposits, keyed by raw-resource class path. */
+	TMap<FString, FSFPResourceSourceMix> ResourceSourceMixes;
 	double EstimatedConnectionLengthMeters = 10.0;
 	FString SelectedConveyorClassPath;
 	FString SelectedConveyorLiftClassPath;
@@ -323,6 +341,10 @@ struct FSFPPlanNode
 	double ConfiguredClockPercent = 100.0;
 	/** Clock of the final partially-loaded machine, or 0 when none is needed. */
 	double PartialClockPercent = 0.0;
+	/** Optional 100%-clock-equivalent upper bound imposed by a mixed source selection. */
+	double MaximumMachineCount = 0.0;
+	/** Relative material-balance cost; mixed-source fallback supply is deliberately expensive. */
+	double SourceCostMultiplier = 1.0;
 	int32 SomersloopCount = 0;
 	double ProductionBoost = 1.0;
 	double PowerMW = 0.0;
@@ -431,6 +453,8 @@ struct FSFPPlanResult
 	TMap<FString, FString> RecipeOverrides;
 	/** Recipe/machine operating settings, keyed by the selected runtime recipe-variant path. */
 	TMap<FString, FSFPMachinePlanSettings> MachineSettings;
+	/** Mixed impure/normal/pure deposits, keyed by raw-resource class path. */
+	TMap<FString, FSFPResourceSourceMix> ResourceSourceMixes;
 	TMap<FString, double> AvailableInputRates;
 	bool bOnlyAvailableRecipes = true;
 	FString SelectedConveyorClassPath;
