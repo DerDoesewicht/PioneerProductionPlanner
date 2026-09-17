@@ -4193,9 +4193,12 @@ int32 FSFPPlannerSolver::BuildDemand(
 				});
 			}
 
-			const bool bHasPurityFamily = !Variants.ContainsByPredicate([](const FMixedVariant& Variant)
+			// Runtime mods may expose only the purities that actually exist for a
+			// resource. One or two valid variants still form a capacity-limited
+			// source family; requiring all three would make those resources infinite.
+			const bool bHasPurityFamily = Variants.ContainsByPredicate([](const FMixedVariant& Variant)
 			{
-				return Variant.RecipeIndex == INDEX_NONE;
+				return Variant.RecipeIndex != INDEX_NONE;
 			});
 			if (bHasPurityFamily)
 			{
@@ -4335,6 +4338,20 @@ int32 FSFPPlannerSolver::BuildDemand(
 
 				if (RemainingRate > KINDA_SMALL_NUMBER)
 				{
+					Context.Result.bResourceSourceLimitsExceeded = true;
+					const double PreviousRelativeShortage = Context.Result.LimitingResourceDisplayName.IsEmpty()
+						? -1.0
+						: Context.Result.LimitingResourceShortagePerMinute
+							/ FMath::Max(1.0, Context.Result.LimitingResourceCapacityPerMinute);
+					const double RelativeShortage = RemainingRate
+						/ FMath::Max(1.0, TotalConfiguredCapacity);
+					if (RelativeShortage > PreviousRelativeShortage)
+					{
+						Context.Result.LimitingResourceClassPath = MixedSourcePath;
+						Context.Result.LimitingResourceDisplayName = ItemName;
+						Context.Result.LimitingResourceCapacityPerMinute = TotalConfiguredCapacity;
+						Context.Result.LimitingResourceShortagePerMinute = RemainingRate;
+					}
 					MissingSourceAlternatives.Reset();
 					for (const FMixedVariant& Variant : Variants)
 					{
@@ -6093,6 +6110,33 @@ FSFPPlanResult FSFPPlannerSolver::SolvePower(const FSFPPowerPlanRequest& Request
 			OutResult = MoveTemp(Context.Result);
 			return false;
 		}
+		// Material balancing can eliminate an initially-created fallback through
+		// coproduct reuse. Judge feasibility from the final balanced withdrawal,
+		// not merely from the recursive expansion before balancing.
+		Context.Result.bResourceSourceLimitsExceeded = false;
+		double LargestBalancedShortage = 0.0;
+		for (const FSFPPlanNode& Node : Context.Result.Nodes)
+		{
+			if (Node.Type != ESFPPlanNodeType::Source
+				|| Node.SourceCostMultiplier < 100000.0
+				|| Node.RatePerMinute <= KINDA_SMALL_NUMBER)
+			{
+				continue;
+			}
+			Context.Result.bResourceSourceLimitsExceeded = true;
+			if (Node.RatePerMinute > LargestBalancedShortage)
+			{
+				LargestBalancedShortage = Node.RatePerMinute;
+				const bool bSameResource = Context.Result.LimitingResourceClassPath == Node.ClassPath;
+				Context.Result.LimitingResourceClassPath = Node.ClassPath;
+				Context.Result.LimitingResourceDisplayName = Node.Title;
+				Context.Result.LimitingResourceShortagePerMinute = Node.RatePerMinute;
+				if (!bSameResource)
+				{
+					Context.Result.LimitingResourceCapacityPerMinute = 0.0;
+				}
+			}
+		}
 
 		Context.Result.SelfConsumptionPowerMW = Context.Result.TotalBasePowerMW;
 		Context.Result.NetPowerMW = FMath::Max(
@@ -6226,68 +6270,162 @@ FSFPPlanResult FSFPPlannerSolver::SolvePower(const FSFPPowerPlanRequest& Request
 			AlienPowerAugmenter.FueledBoostPerAugmenter);
 
 		FSFPPlanResult FinalPlan;
-		bool bConverged = false;
 		bool bCandidateBuildFailed = false;
 		const double NetToleranceMW = FMath::Max(
 			0.01,
 			RequiredNetWithReserve * 1.0e-9);
-		for (int32 Iteration = 0; Iteration < 64; ++Iteration)
-		{
-			FSFPPlanResult ProbePlan;
-			if (!BuildCandidate(Candidate, GeneratorGrossPowerMW, ProbePlan))
-			{
-				RememberCandidateError(
-					Candidate,
-					ProbePlan,
-					TEXT("Die Brennstoff- und Rohstoffkette konnte nicht vollständig bilanziert werden."));
-				bCandidateBuildFailed = true;
-				break;
-			}
-			FinalPlan = MoveTemp(ProbePlan);
-			if (FinalPlan.NetPowerMW + NetToleranceMW >= RequiredNetWithReserve)
-			{
-				bConverged = true;
-				break;
-			}
 
-			const double RequiredTotalGross = RequiredNetWithReserve
-				+ FinalPlan.SelfConsumptionPowerMW + NetToleranceMW;
-			double NextGeneratorGross = SFPVariablePower::GeneratorGrossForTarget(
-				RequiredTotalGross,
-				Request.PassiveAlienPowerAugmenters,
-				Request.FueledAlienPowerAugmenters,
-				AlienPowerAugmenter.BasePowerPerAugmenterMW,
-				AlienPowerAugmenter.PassiveBoostPerAugmenter,
-				AlienPowerAugmenter.FueledBoostPerAugmenter);
-			// Non-linear machine clocking and whole-machine boundaries can make the
-			// fixed-point step stall just below the requested net output. Keep the
-			// sequence monotonic and close the measured shortfall in that case.
-			if (!FMath::IsFinite(NextGeneratorGross)
-				|| NextGeneratorGross <= GeneratorGrossPowerMW + 0.005)
+		// Find a guaranteed upper bracket first. A fixed-point iteration can
+		// converge arbitrarily slowly when the fuel chain consumes most of the
+		// generated power. Doubling the generator contribution reaches every
+		// feasible monotonic solution without tying correctness to an iteration
+		// count chosen for a particular fuel.
+		double LowGeneratorGrossMW = GeneratorGrossPowerMW;
+		FSFPPlanResult LowPlan;
+		if (!BuildCandidate(Candidate, LowGeneratorGrossMW, LowPlan))
+		{
+			RememberCandidateError(
+				Candidate,
+				LowPlan,
+				TEXT("Die Brennstoff- und Rohstoffkette konnte nicht vollständig bilanziert werden."));
+			continue;
+		}
+
+		double HighGeneratorGrossMW = LowGeneratorGrossMW;
+		FSFPPlanResult HighPlan;
+		bool bHaveUpperBracket = LowPlan.NetPowerMW + NetToleranceMW
+			>= RequiredNetWithReserve;
+		if (bHaveUpperBracket)
+		{
+			HighPlan = MoveTemp(LowPlan);
+		}
+		else
+		{
+			constexpr int32 MaxPowerBracketExpansions = 32;
+			for (int32 Expansion = 0;
+				Expansion < MaxPowerBracketExpansions && !bHaveUpperBracket;
+				++Expansion)
 			{
-				NextGeneratorGross = GeneratorGrossPowerMW
-					+ FMath::Max(
-						RequiredNetWithReserve - FinalPlan.NetPowerMW + NetToleranceMW,
-						0.01);
+				const double ShortfallMW = FMath::Max(
+					0.0,
+					RequiredNetWithReserve - LowPlan.NetPowerMW);
+				const double EffectiveGridMultiplier = FMath::Max(
+					1.0e-6,
+					LowPlan.AlienPowerMultiplier);
+				const double ShortfallStepMW = ShortfallMW
+					/ EffectiveGridMultiplier * 1.25 + NetToleranceMW;
+				HighGeneratorGrossMW = FMath::Max(
+					LowGeneratorGrossMW * 2.0,
+					LowGeneratorGrossMW + FMath::Max(ShortfallStepMW, 1.0));
+				if (!FMath::IsFinite(HighGeneratorGrossMW))
+				{
+					RememberCandidateError(
+						Candidate,
+						LowPlan,
+						TEXT("Die adaptive Eigenverbrauchsberechnung überschreitet den darstellbaren Leistungsbereich."));
+					bCandidateBuildFailed = true;
+					break;
+				}
+
+				FSFPPlanResult ProbePlan;
+				if (!BuildCandidate(Candidate, HighGeneratorGrossMW, ProbePlan))
+				{
+					RememberCandidateError(
+						Candidate,
+						ProbePlan,
+						TEXT("Die adaptive Eigenverbrauchsberechnung konnte nicht abgeschlossen werden."));
+					bCandidateBuildFailed = true;
+					break;
+				}
+				if (ProbePlan.NetPowerMW + NetToleranceMW >= RequiredNetWithReserve)
+				{
+					HighPlan = MoveTemp(ProbePlan);
+					bHaveUpperBracket = true;
+					break;
+				}
+
+				LowGeneratorGrossMW = HighGeneratorGrossMW;
+				LowPlan = MoveTemp(ProbePlan);
 			}
-			GeneratorGrossPowerMW = NextGeneratorGross;
 		}
 
 		if (bCandidateBuildFailed)
 		{
 			continue;
 		}
-		if (!bConverged)
+		if (!bHaveUpperBracket)
 		{
 			RememberCandidateError(
 				Candidate,
-				FinalPlan,
+				LowPlan,
 				FString::Printf(
-					TEXT("Die Kette erreicht nach 64 Eigenverbrauchsschritten %s MW netto; benötigt werden einschließlich Reserve %s MW."),
-					*FSFPNumberFormatting::Decimal(FinalPlan.NetPowerMW, 2),
+					TEXT("Die adaptive Suche konnte keine ausreichende Bruttoleistung eingrenzen; zuletzt wurden %s MW netto erreicht, benötigt werden einschließlich Reserve %s MW."),
+					*FSFPNumberFormatting::Decimal(LowPlan.NetPowerMW, 2),
 					*FSFPNumberFormatting::Decimal(RequiredNetWithReserve, 2)));
 			continue;
 		}
+
+		// Refine the valid upper bracket with a safeguarded secant step. The
+		// upper plan is always retained, so reaching the refinement budget can
+		// affect precision but can never turn an already sufficient plan into a
+		// false failure.
+		if (HighGeneratorGrossMW > LowGeneratorGrossMW + 0.005)
+		{
+			constexpr int32 MaxPowerBracketRefinements = 32;
+			for (int32 Refinement = 0;
+				Refinement < MaxPowerBracketRefinements;
+				++Refinement)
+			{
+				if (HighPlan.NetPowerMW - RequiredNetWithReserve <= NetToleranceMW)
+				{
+					break;
+				}
+				const double BracketWidthMW = HighGeneratorGrossMW - LowGeneratorGrossMW;
+				if (BracketWidthMW <= FMath::Max(0.005, HighGeneratorGrossMW * 1.0e-12))
+				{
+					break;
+				}
+
+				const double NetWidthMW = HighPlan.NetPowerMW - LowPlan.NetPowerMW;
+				double ProbeGeneratorGrossMW = LowGeneratorGrossMW + BracketWidthMW * 0.5;
+				if (NetWidthMW > 1.0e-9 && FMath::IsFinite(NetWidthMW))
+				{
+					ProbeGeneratorGrossMW = LowGeneratorGrossMW
+						+ (RequiredNetWithReserve - LowPlan.NetPowerMW)
+							* BracketWidthMW / NetWidthMW;
+				}
+				ProbeGeneratorGrossMW = FMath::Clamp(
+					ProbeGeneratorGrossMW,
+					LowGeneratorGrossMW + BracketWidthMW * 0.05,
+					HighGeneratorGrossMW - BracketWidthMW * 0.05);
+
+				FSFPPlanResult ProbePlan;
+				if (!BuildCandidate(Candidate, ProbeGeneratorGrossMW, ProbePlan))
+				{
+					RememberCandidateError(
+						Candidate,
+						ProbePlan,
+						TEXT("Die eingegrenzte Eigenverbrauchsberechnung konnte nicht abgeschlossen werden."));
+					bCandidateBuildFailed = true;
+					break;
+				}
+				if (ProbePlan.NetPowerMW + NetToleranceMW >= RequiredNetWithReserve)
+				{
+					HighGeneratorGrossMW = ProbeGeneratorGrossMW;
+					HighPlan = MoveTemp(ProbePlan);
+				}
+				else
+				{
+					LowGeneratorGrossMW = ProbeGeneratorGrossMW;
+					LowPlan = MoveTemp(ProbePlan);
+				}
+			}
+		}
+		if (bCandidateBuildFailed)
+		{
+			continue;
+		}
+		FinalPlan = MoveTemp(HighPlan);
 
 		const bool bSameOutputStability = !bPreferStableAutomaticChoice
 			|| Candidate.Generator->bVariableOutput == bBestPlanUsesVariableOutput;

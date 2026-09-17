@@ -568,6 +568,11 @@ namespace
 		Root->SetStringField(TEXT("alienPowerMatrixItemClassPath"), Plan.AlienPowerMatrixItemClassPath);
 		Root->SetStringField(TEXT("alienPowerMatrixDisplayName"), Plan.AlienPowerMatrixDisplayName);
 		Root->SetNumberField(TEXT("alienPowerMatrixRatePerMinute"), Plan.AlienPowerMatrixRatePerMinute);
+		Root->SetBoolField(TEXT("maximumPowerPlan"), Plan.bMaximumPowerPlan);
+		Root->SetBoolField(TEXT("maximumPowerSearchCapped"), Plan.bMaximumPowerSearchCapped);
+		Root->SetStringField(TEXT("maximumPowerLimitingResourceClassPath"), Plan.MaximumPowerLimitingResourceClassPath);
+		Root->SetStringField(TEXT("maximumPowerLimitingResourceDisplayName"), Plan.MaximumPowerLimitingResourceDisplayName);
+		Root->SetNumberField(TEXT("maximumPowerLimitingResourceCapacityPerMinute"), Plan.MaximumPowerLimitingResourceCapacityPerMinute);
 		Root->SetNumberField(TEXT("grossPowerMW"), Plan.GrossPowerMW);
 		Root->SetNumberField(TEXT("selfConsumptionPowerMW"), Plan.SelfConsumptionPowerMW);
 		Root->SetNumberField(TEXT("netPowerMW"), Plan.NetPowerMW);
@@ -844,6 +849,11 @@ namespace
 
 		Root->TryGetNumberField(TEXT("requestedNetPowerMW"), Plan->RequestedNetPowerMW);
 		Root->TryGetNumberField(TEXT("powerReservePercent"), Plan->PowerReservePercent);
+		Root->TryGetBoolField(TEXT("maximumPowerPlan"), Plan->bMaximumPowerPlan);
+		Root->TryGetBoolField(TEXT("maximumPowerSearchCapped"), Plan->bMaximumPowerSearchCapped);
+		Root->TryGetStringField(TEXT("maximumPowerLimitingResourceClassPath"), Plan->MaximumPowerLimitingResourceClassPath);
+		Root->TryGetStringField(TEXT("maximumPowerLimitingResourceDisplayName"), Plan->MaximumPowerLimitingResourceDisplayName);
+		Root->TryGetNumberField(TEXT("maximumPowerLimitingResourceCapacityPerMinute"), Plan->MaximumPowerLimitingResourceCapacityPerMinute);
 		Root->TryGetStringField(TEXT("requestedGeneratorClassPath"), Plan->RequestedGeneratorClassPath);
 		Root->TryGetStringField(TEXT("requestedFuelClassPath"), Plan->RequestedFuelClassPath);
 		if (Root->TryGetNumberField(TEXT("passiveAlienPowerAugmenters"), SummaryNumber) && IsFiniteInt32(SummaryNumber))

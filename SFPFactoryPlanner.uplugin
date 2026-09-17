@@ -1,7 +1,7 @@
 {
 	"FileVersion": 3,
 	"Version": 1,
-	"VersionName": "1.5.1",
+	"VersionName": "1.5.2",
 	"FriendlyName": "Pioneer Production Planner",
 	"Description": "In-game production and net-power planner for vanilla Satisfactory and modded recipe sets, including Satisfactory Plus.",
 	"Category": "Modding",
@@ -29,8 +29,8 @@
 			"SemVersion": "^3.12.0"
 		}
 	],
-	"SemVersion": "1.5.1",
-	"RemoteVersionRange": "1.5.1",
+	"SemVersion": "1.5.2",
+	"RemoteVersionRange": "1.5.2",
 	"RequiredOnRemote": true,
 	"GameVersion": ">=502094"
 }

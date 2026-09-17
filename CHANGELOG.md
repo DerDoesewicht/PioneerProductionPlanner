@@ -1,3 +1,16 @@
+# Pioneer Production Planner 1.5.2
+
+## World-resource power maximum
+
+- Adds a separate calculation for the maximum sustainable net power of the selected generator and fuel setup.
+- Uses free or optionally included occupied resource nodes from the loaded world as hard limits.
+- Uses the miner/extractor, drill head, module, operating-fluid and purity configuration confirmed in Planning.
+- Reports the limiting raw resource and the extraction capacity of the selected configuration.
+- Starts the maximum search from a physically buildable generator scale instead of an artificial 0.1 MW probe.
+- Rejects mathematically rounded plans that would build zero generators.
+- Searches downward when the current target already exceeds available resources, then refines upward to the limiting target.
+- Extends English localization for dynamic power errors, resource-inventory messages, graph help and stored Satisfactory Plus material labels.
+
 # Pioneer Production Planner 1.5.1
 
 ## Power-planning fixes
@@ -6,7 +19,7 @@
 - Enforces that a successful power result uses the exact manually selected generator and fuel.
 - Marks pending power settings and failed recalculations directly in the grid summary while retaining the last successful result for reference.
 - Preserves the concrete solver error when a selected generator/fuel chain cannot be completed.
-- Extends self-consumption convergence for very large and power-intensive chains such as Ficsonium Fuel Rod production.
+- Replaces the fixed self-consumption iteration limit with adaptive bracketing for very large and power-intensive chains such as Ficsonium Fuel Rod production.
 - Accepts a power result only after the requested net output including its configured reserve is actually reached.
 - Stabilizes large material-balance objectives without changing recipe quantities or source constraints.
 - Recipe output and grouped raw-resource names now resolve from the current runtime language instead of retaining cached German labels in English games.
