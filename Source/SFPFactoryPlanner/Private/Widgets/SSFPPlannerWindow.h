@@ -111,6 +111,7 @@ private:
 		const TSharedRef<STableViewBase>& OwnerTable);
 	FReply HandleCalculate();
 	FReply HandleCalculatePower();
+	FReply HandleCalculateMaximumPower();
 	FReply HandleCalculateFromInputs();
 	TSharedRef<ITableRow> HandleGenerateInputBudgetRow(
 		TSharedPtr<FSFPInputBudgetOption> Input,
@@ -121,6 +122,7 @@ private:
 	void RefreshMachineSettings();
 	void RefreshRecipeChoices(const TSharedPtr<FSFPPlanResult>& Plan);
 	TMap<FString, FSFPResourceSourceMix> BuildEffectiveResourceSourceMixes() const;
+	bool AreMaximumPowerResourceSettingsPrepared(TArray<FString>& OutMissingItems) const;
 	TSharedRef<ITableRow> HandleGenerateRecipeChoiceRow(
 		TSharedPtr<FSFPRecipeChoiceRow> Row,
 		const TSharedRef<STableViewBase>& OwnerTable);
@@ -169,6 +171,8 @@ private:
 	FText GetSelectedConveyorLiftText() const;
 	FText GetSelectedPowerGeneratorText() const;
 	FText GetSelectedPowerFuelText() const;
+	FText GetMaximumPowerEstimateText() const;
+	double EstimateMaximumPowerCalculationSeconds() const;
 	FText GetStatusText() const;
 	FText GetPowerSummaryText() const;
 	bool IsPowerPlanRequestDirty() const;
@@ -241,6 +245,8 @@ private:
 	double TargetRate = 60.0;
 	double PowerTargetNetMW = 1000.0;
 	double LastFactoryPowerDemandMW = 0.0;
+	double LastMaximumPowerCalculationSeconds = 0.0;
+	double SmoothedMaximumPowerCalculationSeconds = 0.0;
 	bool bUseCurrentFactoryPowerDemand = false;
 	double PowerReservePercent = 10.0;
 	double PowerGeneratorClockPercent = 100.0;

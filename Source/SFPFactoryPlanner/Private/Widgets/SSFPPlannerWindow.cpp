@@ -1335,6 +1335,39 @@ TSharedRef<SWidget> SSFPPlannerWindow::BuildPowerTab()
 						.Font(FCoreStyle::GetDefaultFontStyle(TEXT("Bold"), 11))
 					]
 				]
+				+ SVerticalBox::Slot()
+				.AutoHeight()
+				.Padding(0.0f, 6.0f, 0.0f, 0.0f)
+				[
+					SNew(SButton)
+					.HAlign(HAlign_Center)
+					.ContentPadding(FMargin(10.0f, 8.0f))
+					.ButtonColorAndOpacity(SFPTheme::Cyan)
+					.OnClicked(this, &SSFPPlannerWindow::HandleCalculateMaximumPower)
+					[
+						SNew(STextBlock)
+						.Text(SFPLocalization::Text(TEXT("MAXIMAL MÖGLICHE NETTOLEISTUNG BERECHNEN")))
+						.Font(FCoreStyle::GetDefaultFontStyle(TEXT("Bold"), 11))
+					]
+				]
+				+ SVerticalBox::Slot()
+				.AutoHeight()
+				.Padding(0.0f, 5.0f, 0.0f, 0.0f)
+				[
+					SNew(STextBlock)
+					.Text(this, &SSFPPlannerWindow::GetMaximumPowerEstimateText)
+					.AutoWrapText(true)
+					.ColorAndOpacity(SFPTheme::Cyan)
+				]
+				+ SVerticalBox::Slot()
+				.AutoHeight()
+				.Padding(0.0f, 4.0f, 0.0f, 0.0f)
+				[
+					SNew(STextBlock)
+					.Text(SFPLocalization::Text(TEXT("Zuerst einmal normal berechnen und im Reiter Planung Miner, Bohrköpfe, Module, Betriebsflüssigkeiten und verfügbare Reinheiten bestätigen.")))
+					.AutoWrapText(true)
+					.ColorAndOpacity(SFPTheme::MutedText)
+				]
 			]
 		]
 		+ SSplitter::Slot()
@@ -2170,7 +2203,6 @@ TMap<FString, FSFPResourceSourceMix> SSFPPlannerWindow::BuildEffectiveResourceSo
 	for (const TPair<FString, FSFPResourceNodeAvailability>& Pair : ResourceNodeAvailability)
 	{
 		FSFPResourceSourceMix& Mix = Effective.FindOrAdd(Pair.Key);
-		if (!Mix.bEnabled) continue;
 		const FSFPResourceNodeAvailability& Live = Pair.Value;
 		auto ApplyLiveLimit = [&Mix](
 			const int32 Total,
@@ -2192,6 +2224,56 @@ TMap<FString, FSFPResourceSourceMix> SSFPPlannerWindow::BuildEffectiveResourceSo
 			&FSFPResourceSourceMix::bPureLimited, &FSFPResourceSourceMix::PureCount);
 	}
 	return Effective;
+}
+
+bool SSFPPlannerWindow::AreMaximumPowerResourceSettingsPrepared(
+	TArray<FString>& OutMissingItems) const
+{
+	OutMissingItems.Reset();
+	TArray<TSharedPtr<FSFPRecipeChoiceRow>> Rows = RecipeChoiceRows;
+	for (const TSharedPtr<FSFPRecipeChoiceRow>& Row : RecipeChoiceRows)
+	{
+		if (Row.IsValid())
+		{
+			Rows.Append(Row->GroupedRawExtractions);
+		}
+	}
+
+	for (const TSharedPtr<FSFPRecipeChoiceRow>& Row : Rows)
+	{
+		if (!Row.IsValid() || !Row->Selected.IsValid()
+			|| Row->Selected->Category != TEXT("Direktabbau / Förderung"))
+		{
+			continue;
+		}
+
+		TSet<FString> ExtractionConfigurations;
+		for (const TSharedPtr<FSFPRecipeOption>& Option : Row->Options)
+		{
+			if (!Option.IsValid()
+				|| Option->Category != TEXT("Direktabbau / Förderung")
+				|| (bOnlyAvailable && !Option->bAvailable))
+			{
+				continue;
+			}
+			ExtractionConfigurations.Add(FString::Printf(
+				TEXT("%s|%s|%s|%s"),
+				*Option->SourceName,
+				*Option->MachineClassPath,
+				*Option->ModulesLabel,
+				*Option->FluidLabel));
+		}
+
+		// A single extraction configuration has nothing for the player to decide.
+		// Multiple miners, drill heads, modules or operating fluids must be
+		// confirmed explicitly before they define a world-resource maximum.
+		if (ExtractionConfigurations.Num() > 1
+			&& !RecipeOverrides.Contains(Row->ItemClassPath))
+		{
+			OutMissingItems.AddUnique(CurrentPlannerItemName(Row->ItemName, Row->ItemClassPath));
+		}
+	}
+	return OutMissingItems.IsEmpty();
 }
 
 FReply SSFPPlannerWindow::HandleCalculatePower()
@@ -2283,6 +2365,722 @@ FReply SSFPPlannerWindow::HandleCalculatePower()
 		*Plan,
 		SolveMilliseconds,
 		TEXT("Strom- und Brennstoffproduktion einschließlich Eigenverbrauch berechnet"));
+	PersistCurrentPlan(false);
+	return FReply::Handled();
+}
+
+FReply SSFPPlannerWindow::HandleCalculateMaximumPower()
+{
+	PowerCalculationError.Reset();
+	if (!Solver.IsValid())
+	{
+		StatusText = TEXT("Der Planner-Solver ist nicht verfügbar");
+		return FReply::Handled();
+	}
+	if (!SelectedPowerGenerator.IsValid() || !SelectedPowerFuel.IsValid())
+	{
+		StatusText = TEXT("Generator- und Brennstoffauswahl konnten nicht geladen werden");
+		return FReply::Handled();
+	}
+	if (SelectedPowerGenerator->ClassPath.IsEmpty() || SelectedPowerFuel->ClassPath.IsEmpty())
+	{
+		StatusText = TEXT("Für die Maximalberechnung einen konkreten Generator und Brennstoff auswählen.");
+		return FReply::Handled();
+	}
+	if (!SelectedConveyor.IsValid() || !SelectedConveyorLift.IsValid())
+	{
+		StatusText = TEXT("Förderband und Förderlift müssen für die Brennstoffkette ausgewählt sein");
+		return FReply::Handled();
+	}
+	if (!CurrentPlan.IsValid() || !CurrentPlan->bPowerProductionPlan || RecipeChoiceRows.IsEmpty())
+	{
+		StatusText = TEXT("Zuerst die gewählte Strom- und Brennstoffproduktion einmal normal berechnen.");
+		return FReply::Handled();
+	}
+	if (CurrentPlan->SelectedGeneratorClassPath != SelectedPowerGenerator->ClassPath
+		|| CurrentPlan->SelectedFuelClassPath != SelectedPowerFuel->ClassPath)
+	{
+		StatusText = TEXT("Generator oder Brennstoff wurde geändert. Vor der Maximalberechnung einmal normal neu berechnen.");
+		return FReply::Handled();
+	}
+	if (ResourceNodeAvailability.IsEmpty())
+	{
+		StatusText = ResourceNodeInventoryError.IsEmpty()
+			? TEXT("Die Welt-Rohstoffinventur ist noch nicht verfügbar.")
+			: FString::Printf(TEXT("Die Welt-Rohstoffinventur ist nicht verfügbar: %s"), *ResourceNodeInventoryError);
+		return FReply::Handled();
+	}
+
+	TArray<FString> MissingResourceSettings;
+	if (!AreMaximumPowerResourceSettingsPrepared(MissingResourceSettings))
+	{
+		StatusText = FString::Printf(
+			TEXT("Vor der Maximalberechnung im Reiter Planung Miner, Bohrköpfe, Module und Betriebsflüssigkeiten bestätigen: %s"),
+			*FString::Join(MissingResourceSettings, TEXT(", ")));
+		return FReply::Handled();
+	}
+
+	auto BuildRequest = [this](
+		const double TargetNetPowerMW,
+		const TMap<FString, FString>& EffectiveRecipeOverrides)
+	{
+		FSFPPowerPlanRequest Request;
+		Request.TargetNetPowerMW = TargetNetPowerMW;
+		Request.ReservePercent = PowerReservePercent;
+		Request.bOnlyAvailable = bOnlyAvailable;
+		Request.GeneratorClassPath = SelectedPowerGenerator->ClassPath;
+		Request.FuelClassPath = SelectedPowerFuel->ClassPath;
+		Request.GeneratorClockPercent = PowerGeneratorClockPercent;
+		Request.PassiveAlienPowerAugmenters = PassiveAlienPowerAugmenters;
+		Request.FueledAlienPowerAugmenters = FueledAlienPowerAugmenters;
+		Request.RecipeOverrides = EffectiveRecipeOverrides;
+		Request.MachineSettings = MachineSettingsOverrides;
+		Request.ResourceSourceMixes = BuildEffectiveResourceSourceMixes();
+		// A world maximum always allocates every available purity. The normal
+		// planner may keep automatic mixing disabled for a hand-authored plan,
+		// but that would leave a single selected purity artificially unlimited.
+		for (const TPair<FString, FSFPResourceNodeAvailability>& Pair : ResourceNodeAvailability)
+		{
+			Request.ResourceSourceMixes.FindOrAdd(Pair.Key).bEnabled = true;
+		}
+		Request.EstimatedConnectionLengthMeters = EstimatedConnectionLengthMeters;
+		Request.SelectedConveyorClassPath = SelectedConveyor->Tier.ClassPath;
+		Request.SelectedConveyorLiftClassPath = SelectedConveyorLift->Tier.ClassPath;
+		return Request;
+	};
+	auto SolveProbe = [this, &BuildRequest](
+		const double TargetNetPowerMW,
+		const TMap<FString, FString>& EffectiveRecipeOverrides,
+		TSharedPtr<FSFPPlanResult>& OutPlan) -> bool
+	{
+		OutPlan = MakeShared<FSFPPlanResult>(Solver->SolvePower(BuildRequest(
+			TargetNetPowerMW,
+			EffectiveRecipeOverrides)));
+		// A mathematically positive target can still round down to no physical
+		// generator. Such a result cannot seed a buildable world-limit search.
+		return OutPlan.IsValid()
+			&& OutPlan->bSuccess
+			&& OutPlan->BuiltGeneratorCount > 0
+			&& OutPlan->GrossPowerMW > KINDA_SMALL_NUMBER
+			&& FMath::IsFinite(OutPlan->NetPowerMW);
+	};
+
+	constexpr double MaximumSearchCeilingMW = 1000000000.0;
+	const double SolveStartTime = FPlatformTime::Seconds();
+	auto RecordMaximumPowerCalculationDuration = [this, SolveStartTime]()
+	{
+		LastMaximumPowerCalculationSeconds = FMath::Max(
+			0.0,
+			FPlatformTime::Seconds() - SolveStartTime);
+		SmoothedMaximumPowerCalculationSeconds = SmoothedMaximumPowerCalculationSeconds > 0.0
+			? FMath::Lerp(
+				SmoothedMaximumPowerCalculationSeconds,
+				LastMaximumPowerCalculationSeconds,
+				0.6)
+			: LastMaximumPowerCalculationSeconds;
+	};
+	TSharedPtr<FSFPPlanResult> BestFeasiblePlan;
+	const TOptional<double> MinimumGeneratorClockValue = GetPowerGeneratorMinClockPercent();
+	const double MinimumGeneratorClockPercent = MinimumGeneratorClockValue.IsSet()
+		? MinimumGeneratorClockValue.GetValue()
+		: 1.0;
+	const double MinimumSearchTargetMW = FMath::Clamp(
+		SelectedPowerGenerator->PowerProductionMW
+			* MinimumGeneratorClockPercent / 100.0,
+		1.0,
+		MaximumSearchCeilingMW);
+	const double OneConfiguredGeneratorMW = FMath::Max(
+		MinimumSearchTargetMW,
+		SelectedPowerGenerator->PowerProductionMW
+			* PowerGeneratorClockPercent / 100.0);
+	double HighTargetMW = FMath::Clamp(
+		FMath::Max(ResolvePowerTargetNetMW(), OneConfiguredGeneratorMW),
+		MinimumSearchTargetMW,
+		MaximumSearchCeilingMW);
+	double LowTargetMW = 0.0;
+	TSharedPtr<FSFPPlanResult> HighPlan;
+	TSharedPtr<FSFPPlanResult> LimitingPlan;
+	FString LastInfeasibleError;
+	bool bHighSolved = SolveProbe(HighTargetMW, RecipeOverrides, HighPlan);
+	if (!bHighSolved && HighPlan.IsValid())
+	{
+		LastInfeasibleError = HighPlan->ErrorMessage;
+	}
+
+	if (!bHighSolved || HighPlan->bResourceSourceLimitsExceeded)
+	{
+		// The player's current target can already be above the world limit or
+		// beyond the numerically solvable range of a large modded feedback chain.
+		// Walk down until a physical supplied plan exists. Failed probes remain
+		// valid conservative upper bounds instead of aborting the whole search.
+		if (bHighSolved && HighPlan->bResourceSourceLimitsExceeded)
+		{
+			LimitingPlan = HighPlan;
+		}
+		double DownwardProbeMW = HighTargetMW;
+		for (int32 Reduction = 0; Reduction < 40; ++Reduction)
+		{
+			const double NextProbeMW = FMath::Max(
+				MinimumSearchTargetMW,
+				DownwardProbeMW * 0.5);
+			if (NextProbeMW >= DownwardProbeMW - KINDA_SMALL_NUMBER)
+			{
+				break;
+			}
+			DownwardProbeMW = NextProbeMW;
+
+			TSharedPtr<FSFPPlanResult> ProbePlan;
+			const bool bProbeSolved = SolveProbe(DownwardProbeMW, RecipeOverrides, ProbePlan);
+			if (!bProbeSolved)
+			{
+				HighTargetMW = DownwardProbeMW;
+				HighPlan = ProbePlan;
+				if (ProbePlan.IsValid() && !ProbePlan->ErrorMessage.IsEmpty())
+				{
+					LastInfeasibleError = ProbePlan->ErrorMessage;
+				}
+				continue;
+			}
+			if (ProbePlan->bResourceSourceLimitsExceeded)
+			{
+				HighTargetMW = DownwardProbeMW;
+				HighPlan = ProbePlan;
+				LimitingPlan = ProbePlan;
+				continue;
+			}
+
+			LowTargetMW = DownwardProbeMW;
+			BestFeasiblePlan = ProbePlan;
+			break;
+		}
+
+		if (!BestFeasiblePlan.IsValid())
+		{
+			if (LimitingPlan.IsValid())
+			{
+				const FString LimitingResource = LimitingPlan->LimitingResourceDisplayName.IsEmpty()
+					? TEXT("mindestens einem Rohstoff")
+					: CurrentPlannerItemName(
+						LimitingPlan->LimitingResourceDisplayName,
+						LimitingPlan->LimitingResourceClassPath);
+				PowerCalculationError = FString::Printf(
+					TEXT("Bereits die kleinste physisch betreibbare Leistung überschreitet die verfügbare Menge von %s."),
+					*LimitingResource);
+			}
+			else
+			{
+				PowerCalculationError = LastInfeasibleError.IsEmpty()
+					? TEXT("Mit der gewählten Förderkonfiguration ist keine physisch betreibbare Nettoleistung möglich.")
+					: LastInfeasibleError;
+			}
+			StatusText = FString::Printf(
+				TEXT("Maximalberechnung fehlgeschlagen: %s"),
+				*PowerCalculationError);
+			RecordMaximumPowerCalculationDuration();
+			return FReply::Handled();
+		}
+	}
+	else
+	{
+		LowTargetMW = HighTargetMW;
+		BestFeasiblePlan = HighPlan;
+		for (int32 Expansion = 0;
+			Expansion < 32 && HighTargetMW < MaximumSearchCeilingMW;
+			++Expansion)
+		{
+			HighTargetMW = FMath::Min(MaximumSearchCeilingMW, HighTargetMW * 2.0);
+			if (!SolveProbe(HighTargetMW, RecipeOverrides, HighPlan))
+			{
+				if (HighPlan.IsValid() && !HighPlan->ErrorMessage.IsEmpty())
+				{
+					LastInfeasibleError = HighPlan->ErrorMessage;
+				}
+				break;
+			}
+			if (HighPlan->bResourceSourceLimitsExceeded)
+			{
+				LimitingPlan = HighPlan;
+				break;
+			}
+			LowTargetMW = HighTargetMW;
+			BestFeasiblePlan = HighPlan;
+		}
+	}
+
+	bool bSearchCapped = HighTargetMW >= MaximumSearchCeilingMW
+		&& HighPlan.IsValid() && HighPlan->bSuccess
+		&& !HighPlan->bResourceSourceLimitsExceeded;
+	if (bSearchCapped)
+	{
+		LimitingPlan.Reset();
+	}
+	if (!bSearchCapped)
+	{
+		for (int32 Refinement = 0; Refinement < 24; ++Refinement)
+		{
+			const double WidthMW = HighTargetMW - LowTargetMW;
+			if (WidthMW <= FMath::Max(0.01, LowTargetMW * 1.0e-7))
+			{
+				break;
+			}
+			const double ProbeTargetMW = LowTargetMW + WidthMW * 0.5;
+			TSharedPtr<FSFPPlanResult> ProbePlan;
+			if (!SolveProbe(ProbeTargetMW, RecipeOverrides, ProbePlan))
+			{
+				// A failed high-side probe still narrows the conservative maximum.
+				// Keep the last fully buildable plan and continue below this bound.
+				HighTargetMW = ProbeTargetMW;
+				if (ProbePlan.IsValid() && !ProbePlan->ErrorMessage.IsEmpty())
+				{
+					LastInfeasibleError = ProbePlan->ErrorMessage;
+				}
+				continue;
+			}
+			if (ProbePlan->bResourceSourceLimitsExceeded)
+			{
+				HighTargetMW = ProbeTargetMW;
+				LimitingPlan = ProbePlan;
+			}
+			else
+			{
+				LowTargetMW = ProbeTargetMW;
+				BestFeasiblePlan = ProbePlan;
+			}
+		}
+	}
+
+	if (!BestFeasiblePlan.IsValid())
+	{
+		StatusText = TEXT("Maximalberechnung fehlgeschlagen: Kein versorgter Stromplan gefunden.");
+		RecordMaximumPowerCalculationDuration();
+		return FReply::Handled();
+	}
+
+	// A physical world maximum must not be tied to the one recipe chain picked by
+	// the normal deterministic selector. Preserve every explicit player override,
+	// but test every other available production recipe reached by the power chain.
+	// Accepted alternatives can reveal new intermediate items, therefore repeat
+	// the pass until the chain is stable. This is deliberately limited to the
+	// maximum calculation; ordinary planning remains immediate and predictable.
+	const TMap<FString, FString> ManualRecipeOverrides = RecipeOverrides;
+	TMap<FString, FString> OptimizedRecipeOverrides = RecipeOverrides;
+	int32 RecipeCandidatesTested = 0;
+	int32 RecipeAlternativesAccepted = 0;
+	int32 RecipeCandidatesAwaitingExtractionSettings = 0;
+
+	auto HasUnconfirmedExtractionSettings = [
+		this,
+		&ManualRecipeOverrides](const TSharedPtr<FSFPPlanResult>& Plan) -> bool
+	{
+		if (!Plan.IsValid()) return true;
+		TSet<FString> SeenItems;
+		for (const FSFPPlanNode& Node : Plan->Nodes)
+		{
+			if (Node.Type != ESFPPlanNodeType::Machine
+				|| Node.ProducedItemClassPath.IsEmpty()
+				|| SeenItems.Contains(Node.ProducedItemClassPath))
+			{
+				continue;
+			}
+			SeenItems.Add(Node.ProducedItemClassPath);
+
+			TArray<TSharedPtr<FSFPRecipeOption>> Options;
+			Solver->GetRecipeOptionsForItemPath(
+				Node.ProducedItemClassPath,
+				bOnlyAvailable,
+				Options);
+			const TSharedPtr<FSFPRecipeOption>* SelectedOption = Options.FindByPredicate(
+				[&Node](const TSharedPtr<FSFPRecipeOption>& Option)
+				{
+					return Option.IsValid()
+						&& Option->RecipeClassPath == Node.RecipeClassPath;
+				});
+			if (SelectedOption == nullptr || !SelectedOption->IsValid()
+				|| (*SelectedOption)->Category != TEXT("Direktabbau / Förderung"))
+			{
+				continue;
+			}
+
+			TSet<FString> ExtractionConfigurations;
+			for (const TSharedPtr<FSFPRecipeOption>& Option : Options)
+			{
+				if (!Option.IsValid()
+					|| Option->Category != TEXT("Direktabbau / Förderung")
+					|| (bOnlyAvailable && !Option->bAvailable))
+				{
+					continue;
+				}
+				ExtractionConfigurations.Add(FString::Printf(
+					TEXT("%s|%s|%s|%s"),
+					*Option->SourceName,
+					*Option->MachineClassPath,
+					*Option->ModulesLabel,
+					*Option->FluidLabel));
+			}
+			if (ExtractionConfigurations.Num() > 1
+				&& !ManualRecipeOverrides.Contains(Node.ProducedItemClassPath))
+			{
+				return true;
+			}
+		}
+		return false;
+	};
+
+	auto SearchUpwardForOverrides = [
+		this,
+		&SolveProbe,
+		MinimumSearchTargetMW,
+		MaximumSearchCeilingMW](
+		const TMap<FString, FString>& EffectiveRecipeOverrides,
+		const TSharedPtr<FSFPPlanResult>& SeedPlan,
+		TSharedPtr<FSFPPlanResult>& OutLimitingPlan,
+		bool& bOutSearchCapped,
+		FString& OutFailure) -> TSharedPtr<FSFPPlanResult>
+	{
+		OutLimitingPlan.Reset();
+		bOutSearchCapped = false;
+		OutFailure.Reset();
+		if (!SeedPlan.IsValid() || !SeedPlan->bSuccess
+			|| SeedPlan->bResourceSourceLimitsExceeded)
+		{
+			return nullptr;
+		}
+
+		TSharedPtr<FSFPPlanResult> BestPlan = SeedPlan;
+		double LowMW = FMath::Clamp(
+			SeedPlan->RequestedNetPowerMW,
+			MinimumSearchTargetMW,
+			MaximumSearchCeilingMW);
+		double HighMW = LowMW;
+		bool bUpperBoundFound = false;
+
+		for (int32 Expansion = 0;
+			Expansion < 32 && HighMW < MaximumSearchCeilingMW;
+			++Expansion)
+		{
+			const double NextHighMW = FMath::Min(
+				MaximumSearchCeilingMW,
+				FMath::Max(HighMW * 2.0, HighMW + MinimumSearchTargetMW));
+			TSharedPtr<FSFPPlanResult> ProbePlan;
+			const bool bSolved = SolveProbe(
+				NextHighMW,
+				EffectiveRecipeOverrides,
+				ProbePlan);
+			HighMW = NextHighMW;
+			if (!bSolved)
+			{
+				bUpperBoundFound = true;
+				if (ProbePlan.IsValid()) OutFailure = ProbePlan->ErrorMessage;
+				break;
+			}
+			if (ProbePlan->bResourceSourceLimitsExceeded)
+			{
+				bUpperBoundFound = true;
+				OutLimitingPlan = ProbePlan;
+				break;
+			}
+			LowMW = HighMW;
+			BestPlan = ProbePlan;
+		}
+
+		if (!bUpperBoundFound && HighMW >= MaximumSearchCeilingMW)
+		{
+			bOutSearchCapped = true;
+			return BestPlan;
+		}
+
+		for (int32 Refinement = 0; Refinement < 24; ++Refinement)
+		{
+			const double WidthMW = HighMW - LowMW;
+			if (WidthMW <= FMath::Max(0.01, LowMW * 1.0e-7))
+			{
+				break;
+			}
+			const double ProbeMW = LowMW + WidthMW * 0.5;
+			TSharedPtr<FSFPPlanResult> ProbePlan;
+			if (!SolveProbe(ProbeMW, EffectiveRecipeOverrides, ProbePlan))
+			{
+				HighMW = ProbeMW;
+				if (ProbePlan.IsValid() && !ProbePlan->ErrorMessage.IsEmpty())
+				{
+					OutFailure = ProbePlan->ErrorMessage;
+				}
+				continue;
+			}
+			if (ProbePlan->bResourceSourceLimitsExceeded)
+			{
+				HighMW = ProbeMW;
+				OutLimitingPlan = ProbePlan;
+			}
+			else
+			{
+				LowMW = ProbeMW;
+				BestPlan = ProbePlan;
+			}
+		}
+		return BestPlan;
+	};
+
+	auto CalculateResourceHeadroom = [](const TSharedPtr<FSFPPlanResult>& Plan) -> double
+	{
+		if (!Plan.IsValid()) return 0.0;
+		double HighestSourceUtilization = 0.0;
+		for (const FSFPPlanNode& Node : Plan->Nodes)
+		{
+			if (Node.Type != ESFPPlanNodeType::Machine
+				|| Node.MaximumMachineCount <= KINDA_SMALL_NUMBER
+				|| Node.MachineCount <= KINDA_SMALL_NUMBER)
+			{
+				continue;
+			}
+			HighestSourceUtilization = FMath::Max(
+				HighestSourceUtilization,
+				Node.MachineCount / Node.MaximumMachineCount);
+		}
+		return HighestSourceUtilization > KINDA_SMALL_NUMBER
+			? 1.0 / HighestSourceUtilization
+			: 1.0;
+	};
+
+	// Keep the Slate/game thread responsive enough for large Satisfactory Plus
+	// catalogs. Every alternative gets one fixed-target feasibility probe; only
+	// the best resource-headroom route is adopted per pass. The expensive full
+	// maximum search runs once after the recipe chain has stabilized.
+	constexpr int32 MaximumRecipeOptimizationPasses = 3;
+	constexpr int32 MaximumRecipeCandidateProbes = 16;
+	constexpr double MaximumRecipeOptimizationSeconds = 1.0;
+	const double RecipeOptimizationStartTime = FPlatformTime::Seconds();
+	bool bRecipeSearchBudgetReached = false;
+
+	for (int32 OptimizationPass = 0;
+		OptimizationPass < MaximumRecipeOptimizationPasses;
+		++OptimizationPass)
+	{
+		TMap<FString, FString> ActiveRecipeByItem;
+		for (const FSFPPlanNode& Node : BestFeasiblePlan->Nodes)
+		{
+			if (Node.Type == ESFPPlanNodeType::Machine
+				&& !Node.ProducedItemClassPath.IsEmpty()
+				&& !Node.RecipeClassPath.IsEmpty())
+			{
+				ActiveRecipeByItem.FindOrAdd(Node.ProducedItemClassPath) = Node.RecipeClassPath;
+			}
+		}
+
+		TSharedPtr<FSFPPlanResult> BestCandidatePlan;
+		TMap<FString, FString> BestCandidateOverrides;
+		double BestCandidateHeadroom = CalculateResourceHeadroom(BestFeasiblePlan);
+		double BestCandidateSelfConsumption = BestFeasiblePlan->SelfConsumptionPowerMW;
+		FString BestCandidateRecipePath;
+		TArray<FString> ActiveItemPaths;
+		ActiveRecipeByItem.GetKeys(ActiveItemPaths);
+		ActiveItemPaths.Sort();
+
+		for (const FString& ActiveItemPath : ActiveItemPaths)
+		{
+			if (RecipeCandidatesTested >= MaximumRecipeCandidateProbes
+				|| FPlatformTime::Seconds() - RecipeOptimizationStartTime
+					>= MaximumRecipeOptimizationSeconds)
+			{
+				bRecipeSearchBudgetReached = true;
+				break;
+			}
+			// An explicit recipe selection is a hard constraint, including selected
+			// Satisfactory Plus miner/drill-head variants.
+			if (ManualRecipeOverrides.Contains(ActiveItemPath))
+			{
+				continue;
+			}
+			const FString& ActiveRecipePath = ActiveRecipeByItem.FindChecked(ActiveItemPath);
+
+			TArray<TSharedPtr<FSFPRecipeOption>> Options;
+			Solver->GetRecipeOptionsForItemPath(ActiveItemPath, bOnlyAvailable, Options);
+			Options.Sort([](
+				const TSharedPtr<FSFPRecipeOption>& Left,
+				const TSharedPtr<FSFPRecipeOption>& Right)
+			{
+				return Left.IsValid() && Right.IsValid()
+					? Left->RecipeClassPath < Right->RecipeClassPath
+					: Left.IsValid();
+			});
+			for (const TSharedPtr<FSFPRecipeOption>& Option : Options)
+			{
+				if (RecipeCandidatesTested >= MaximumRecipeCandidateProbes
+					|| FPlatformTime::Seconds() - RecipeOptimizationStartTime
+						>= MaximumRecipeOptimizationSeconds)
+				{
+					bRecipeSearchBudgetReached = true;
+					break;
+				}
+				if (!Option.IsValid()
+					|| Option->RecipeClassPath.IsEmpty()
+					|| Option->RecipeClassPath == ActiveRecipePath
+					|| Option->Category == TEXT("Direktabbau / Förderung"))
+				{
+					continue;
+				}
+
+				++RecipeCandidatesTested;
+				TMap<FString, FString> CandidateOverrides = OptimizedRecipeOverrides;
+				CandidateOverrides.Add(ActiveItemPath, Option->RecipeClassPath);
+
+				// A route unable to supply the incumbent maximum cannot improve it.
+				TSharedPtr<FSFPPlanResult> CandidateSeed;
+				if (!SolveProbe(
+					BestFeasiblePlan->RequestedNetPowerMW,
+					CandidateOverrides,
+					CandidateSeed)
+					|| CandidateSeed->bResourceSourceLimitsExceeded)
+				{
+					continue;
+				}
+				if (HasUnconfirmedExtractionSettings(CandidateSeed))
+				{
+					++RecipeCandidatesAwaitingExtractionSettings;
+					continue;
+				}
+
+				const double CandidateHeadroom = CalculateResourceHeadroom(CandidateSeed);
+				const double HeadroomTolerance = FMath::Max(
+					1.0e-6,
+					BestCandidateHeadroom * 1.0e-6);
+				const bool bMoreHeadroom = CandidateHeadroom
+					> BestCandidateHeadroom + HeadroomTolerance;
+				const bool bEqualHeadroom = FMath::IsNearlyEqual(
+					CandidateHeadroom,
+					BestCandidateHeadroom,
+					HeadroomTolerance);
+				const bool bLowerSelfConsumption = bEqualHeadroom
+					&& CandidateSeed->SelfConsumptionPowerMW
+						< BestCandidateSelfConsumption - 0.01;
+				const bool bStableTieBreak = BestCandidatePlan.IsValid()
+					&& bEqualHeadroom
+					&& FMath::IsNearlyEqual(
+						CandidateSeed->SelfConsumptionPowerMW,
+						BestCandidateSelfConsumption,
+						0.01)
+					&& (BestCandidateRecipePath.IsEmpty()
+						|| Option->RecipeClassPath < BestCandidateRecipePath);
+				if (bMoreHeadroom || bLowerSelfConsumption || bStableTieBreak)
+				{
+					BestCandidatePlan = CandidateSeed;
+					BestCandidateOverrides = MoveTemp(CandidateOverrides);
+					BestCandidateHeadroom = CandidateHeadroom;
+					BestCandidateSelfConsumption = CandidateSeed->SelfConsumptionPowerMW;
+					BestCandidateRecipePath = Option->RecipeClassPath;
+				}
+			}
+			if (bRecipeSearchBudgetReached) break;
+		}
+
+		if (!BestCandidatePlan.IsValid())
+		{
+			break;
+		}
+		OptimizedRecipeOverrides = MoveTemp(BestCandidateOverrides);
+		BestFeasiblePlan = BestCandidatePlan;
+		++RecipeAlternativesAccepted;
+		if (bRecipeSearchBudgetReached) break;
+	}
+
+	if (RecipeAlternativesAccepted > 0)
+	{
+		TSharedPtr<FSFPPlanResult> OptimizedLimitingPlan;
+		bool bOptimizedSearchCapped = false;
+		FString OptimizedFailure;
+		TSharedPtr<FSFPPlanResult> OptimizedMaximum = SearchUpwardForOverrides(
+			OptimizedRecipeOverrides,
+			BestFeasiblePlan,
+			OptimizedLimitingPlan,
+			bOptimizedSearchCapped,
+			OptimizedFailure);
+		if (OptimizedMaximum.IsValid())
+		{
+			BestFeasiblePlan = OptimizedMaximum;
+			LimitingPlan = OptimizedLimitingPlan;
+			LastInfeasibleError = OptimizedFailure;
+			bSearchCapped = bOptimizedSearchCapped;
+		}
+	}
+
+	if (RecipeCandidatesTested > 0)
+	{
+		BestFeasiblePlan->Warnings.AddUnique(FString::Printf(
+			TEXT("Maximalsuche: %d alternative Produktionsrezepte geprüft, %d bessere Rezeptwechsel übernommen. Manuell festgelegte Rezepte blieben unverändert."),
+			RecipeCandidatesTested,
+			RecipeAlternativesAccepted));
+	}
+	if (RecipeCandidatesAwaitingExtractionSettings > 0)
+	{
+		BestFeasiblePlan->Warnings.AddUnique(FString::Printf(
+			TEXT("Maximalsuche: %d Rezeptvarianten benötigen zuerst eine bestätigte Miner-, Bohrkopf-, Modul- oder Betriebsflüssigkeitsauswahl im Reiter Planung."),
+			RecipeCandidatesAwaitingExtractionSettings));
+	}
+	if (bRecipeSearchBudgetReached)
+	{
+		BestFeasiblePlan->Warnings.AddUnique(FString::Printf(
+			TEXT("Maximalsuche: Die Rezeptoptimierung wurde nach %d Kandidaten zeitlich begrenzt. Das Ergebnis ist baubar, kann aber unter dem theoretischen Maximum liegen."),
+			RecipeCandidatesTested));
+	}
+	if (!LastInfeasibleError.IsEmpty() && !LimitingPlan.IsValid())
+	{
+		BestFeasiblePlan->Warnings.AddUnique(FString::Printf(
+			TEXT("Maximalsuche: Ein höherer Probelauf war nicht vollständig lösbar; das letzte vollständig berechenbare Ergebnis wird als konservative Obergrenze verwendet. %s"),
+			*LastInfeasibleError));
+	}
+
+	BestFeasiblePlan->bMaximumPowerPlan = true;
+	BestFeasiblePlan->bMaximumPowerSearchCapped = bSearchCapped;
+	if (LimitingPlan.IsValid())
+	{
+		BestFeasiblePlan->MaximumPowerLimitingResourceClassPath =
+			LimitingPlan->LimitingResourceClassPath;
+		BestFeasiblePlan->MaximumPowerLimitingResourceDisplayName =
+			LimitingPlan->LimitingResourceDisplayName;
+		BestFeasiblePlan->MaximumPowerLimitingResourceCapacityPerMinute =
+			LimitingPlan->LimitingResourceCapacityPerMinute;
+	}
+	// Persist only the player's manual limits. Live save counts are refreshed on
+	// every open and must never become stale plan data.
+	BestFeasiblePlan->ResourceSourceMixes = ResourceSourceMixes;
+
+	const TSharedPtr<FSFPPlanResult> PreviousPlan = CurrentPlan;
+	CarryForwardNodeCompletion(bCarryCurrentPlanProgress ? PreviousPlan.Get() : nullptr, *BestFeasiblePlan);
+	CurrentPlan = BestFeasiblePlan;
+	bCarryCurrentPlanProgress = true;
+	bSharedPlanContentDirty = bSharedPlanMode && !ActiveSharedPlanFileName.IsEmpty();
+	bUseCurrentFactoryPowerDemand = false;
+	PowerTargetNetMW = BestFeasiblePlan->RequestedNetPowerMW;
+	SelectedTargets.Reset();
+	SelectedProduct.Reset();
+	if (TargetList.IsValid()) TargetList->RequestListRefresh();
+	if (ProductList.IsValid()) ProductList->ClearSelection();
+	if (GraphPanel.IsValid()) GraphPanel->SetPlan(BestFeasiblePlan);
+	RefreshRecipeChoices(BestFeasiblePlan);
+	RefreshInputBudgets(BestFeasiblePlan, true);
+	CaptureInputBudgetsToPlan();
+
+	const double SolveMilliseconds = (FPlatformTime::Seconds() - SolveStartTime) * 1000.0;
+	RecordMaximumPowerCalculationDuration();
+	if (bSearchCapped)
+	{
+		StatusText = FString::Printf(
+			TEXT("Mindestens %s MW netto sind mit den gewählten Quellen möglich; die Suchgrenze wurde erreicht. Berechnung: %s ms"),
+			*FSFPNumberFormatting::Decimal(BestFeasiblePlan->RequestedNetPowerMW, 2),
+			*FSFPNumberFormatting::Decimal(SolveMilliseconds, 2));
+	}
+	else
+	{
+		StatusText = FString::Printf(
+			TEXT("Maximal mögliche Nettoleistung aus den gewählten Weltressourcen: %s MW. Engpass: %s. Berechnung: %s ms"),
+			*FSFPNumberFormatting::Decimal(BestFeasiblePlan->RequestedNetPowerMW, 2),
+			BestFeasiblePlan->MaximumPowerLimitingResourceDisplayName.IsEmpty()
+				? TEXT("Rohstoffkapazität")
+				: *CurrentPlannerItemName(
+					BestFeasiblePlan->MaximumPowerLimitingResourceDisplayName,
+					BestFeasiblePlan->MaximumPowerLimitingResourceClassPath),
+			*FSFPNumberFormatting::Decimal(SolveMilliseconds, 2));
+	}
 	PersistCurrentPlan(false);
 	return FReply::Handled();
 }
@@ -4238,6 +5036,63 @@ FText SSFPPlannerWindow::GetSelectedPowerFuelText() const
 			*FSFPNumberFormatting::Decimal(SelectedPowerFuel->EnergyValueMJ, 3)));
 }
 
+double SSFPPlannerWindow::EstimateMaximumPowerCalculationSeconds() const
+{
+	if (SmoothedMaximumPowerCalculationSeconds > 0.0)
+	{
+		return FMath::Clamp(SmoothedMaximumPowerCalculationSeconds, 0.1, 300.0);
+	}
+
+	const int32 PlanNodeCount = CurrentPlan.IsValid() ? CurrentPlan->Nodes.Num() : 0;
+	int32 AlternativeRecipeCount = 0;
+	TFunction<void(const TArray<TSharedPtr<FSFPRecipeChoiceRow>>&)> CountAlternatives;
+	CountAlternatives = [&AlternativeRecipeCount, &CountAlternatives](
+		const TArray<TSharedPtr<FSFPRecipeChoiceRow>>& Rows)
+	{
+		for (const TSharedPtr<FSFPRecipeChoiceRow>& Row : Rows)
+		{
+			if (!Row.IsValid())
+			{
+				continue;
+			}
+			AlternativeRecipeCount += FMath::Max(0, Row->Options.Num() - 1);
+			CountAlternatives(Row->GroupedRawExtractions);
+		}
+	};
+	CountAlternatives(RecipeChoiceRows);
+
+	// The maximum search has a bounded alternate-recipe scan, followed by one
+	// physical world-limit search. This estimate is intentionally conservative;
+	// the measured duration from completed runs replaces it automatically.
+	return FMath::Clamp(
+		2.0 + static_cast<double>(PlanNodeCount) * 0.05
+			+ static_cast<double>(FMath::Min(16, AlternativeRecipeCount)) * 0.2,
+		2.0,
+		45.0);
+}
+
+FText SSFPPlannerWindow::GetMaximumPowerEstimateText() const
+{
+	if (!CurrentPlan.IsValid() || !CurrentPlan->bPowerProductionPlan)
+	{
+		return SFPLocalization::Text(TEXT(
+			"Geschätzte Dauer: zuerst einmal normal berechnen."));
+	}
+
+	const double EstimatedSeconds = EstimateMaximumPowerCalculationSeconds();
+	if (LastMaximumPowerCalculationSeconds > 0.0)
+	{
+		return SFPLocalization::Text(FString::Printf(
+			TEXT("Geschätzte Dauer: ca. %s s (letzter Lauf: %s s)"),
+			*FSFPNumberFormatting::Decimal(EstimatedSeconds, 1),
+			*FSFPNumberFormatting::Decimal(LastMaximumPowerCalculationSeconds, 1)));
+	}
+
+	return SFPLocalization::Text(FString::Printf(
+		TEXT("Geschätzte Dauer: ca. %s s (erste Schätzung aus Plan und Rezepten)"),
+		*FSFPNumberFormatting::Decimal(EstimatedSeconds, 1)));
+}
+
 FText SSFPPlannerWindow::GetStatusText() const
 {
 	return SFPLocalization::Text(StatusText);
@@ -4263,6 +5118,33 @@ FText SSFPPlannerWindow::GetPowerSummaryText() const
 	else if (IsPowerPlanRequestDirty())
 	{
 		Summary += TEXT("ÄNDERUNGEN NOCH NICHT BERECHNET\nDer darunter angezeigte Stromplan ist das letzte erfolgreiche Ergebnis. Strom- und Brennstoffproduktion neu berechnen, um die aktuelle Auswahl zu übernehmen.\n\n");
+	}
+	if (Plan.bMaximumPowerPlan)
+	{
+		if (Plan.bMaximumPowerSearchCapped)
+		{
+			Summary += FString::Printf(
+				TEXT("WELTRESSOURCEN-MAXIMUM\n"
+					"• Mindestens erreichbar: %s MW netto\n"
+					"• Die Suchgrenze wurde erreicht; für mindestens eine benötigte Ressource liegt keine wirksame endliche Grenze vor.\n\n"),
+				*FSFPNumberFormatting::Decimal(Plan.RequestedNetPowerMW, 2));
+		}
+		else
+		{
+			Summary += FString::Printf(
+				TEXT("WELTRESSOURCEN-MAXIMUM\n"
+					"• Maximal nutzbares Nettoziel: %s MW\n"
+					"• Begrenzender Rohstoff: %s\n"
+					"• Förderkapazität dieser Konfiguration: %s/min\n"
+					"• Sicherheitsreserve, freie/belegte Quellen sowie gewählte Miner, Bohrköpfe, Module und Betriebsflüssigkeiten sind berücksichtigt.\n\n"),
+				*FSFPNumberFormatting::Decimal(Plan.RequestedNetPowerMW, 2),
+				Plan.MaximumPowerLimitingResourceDisplayName.IsEmpty()
+					? TEXT("Rohstoffkapazität")
+					: *CurrentPlannerItemName(
+						Plan.MaximumPowerLimitingResourceDisplayName,
+						Plan.MaximumPowerLimitingResourceClassPath),
+				*FSFPNumberFormatting::Decimal(Plan.MaximumPowerLimitingResourceCapacityPerMinute, 3));
+		}
 	}
 	Summary += FString::Printf(
 		TEXT("NETZBILANZ\n"

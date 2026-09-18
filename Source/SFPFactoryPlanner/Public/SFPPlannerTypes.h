@@ -444,6 +444,19 @@ struct FSFPPlanResult
 	FString WasteDisplayName;
 	FString WasteForm;
 	double WasteRatePerMinute = 0.0;
+	/** At least one configured live-world resource family had to fall back to external supply. */
+	bool bResourceSourceLimitsExceeded = false;
+	FString LimitingResourceClassPath;
+	FString LimitingResourceDisplayName;
+	double LimitingResourceCapacityPerMinute = 0.0;
+	double LimitingResourceShortagePerMinute = 0.0;
+	/** This plan was produced by the live-world maximum-power search. */
+	bool bMaximumPowerPlan = false;
+	/** The configured search ceiling was still feasible, so the true maximum is higher. */
+	bool bMaximumPowerSearchCapped = false;
+	FString MaximumPowerLimitingResourceClassPath;
+	FString MaximumPowerLimitingResourceDisplayName;
+	double MaximumPowerLimitingResourceCapacityPerMinute = 0.0;
 	int32 MaxDepth = 0;
 	TArray<FSFPPlanNode> Nodes;
 	TArray<FSFPPlanEdge> Edges;
