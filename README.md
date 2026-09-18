@@ -2,9 +2,9 @@
 
 In-game production and net-power planner for Vanilla Satisfactory, Satisfactory Plus and compatible recipe mods.
 
-Version 1.5.2 adds a world-resource-limited maximum net-power calculation for the selected generator, fuel and extraction configuration. The search now starts at a physically buildable generator scale instead of a hard-coded 0.1 MW probe, rejects zero-generator results and can bracket downward when the current target already exceeds the available world resources.
+Version 1.5.2 adds a world-resource-limited maximum net-power calculation. The maximum search evaluates alternate recipes with a short one-second/16-candidate budget, starts from a physical generator scale and retains the last fully buildable plan when a higher Satisfactory Plus probe can no longer be solved completely. Manual recipe and extraction choices remain fixed. If a very large catalog cannot be scanned within the budget, the planner reports the conservative result instead of blocking the game thread. The generator/fuel selection and large self-powered-chain fixes from 1.5.1 remain included.
 
-The generator/fuel persistence and large self-powered-chain fixes from 1.5.1 remain included. Ficsonium and other power-intensive chains continue their self-consumption calculation until the requested net output including reserve is reached.
+The maximum-power action shows an approximate duration based on the current plan and recipe scope. After each completed or failed run, the measured runtime is used to improve the next estimate.
 
 World-aware resource planning and explicit fuel-production planning from 1.5.0 remain included. Select Turbofuel, Ficsonium Fuel Rod or another compatible generator fuel, then calculate the complete production chain either for a manual net-power target or for the demand of the current factory plan.
 

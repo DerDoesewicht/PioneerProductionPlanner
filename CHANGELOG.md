@@ -2,16 +2,20 @@
 
 ## World-resource power maximum
 
-- Adds a separate calculation for the maximum sustainable net power of the selected generator and fuel setup.
-- Uses free or optionally included occupied resource nodes from the loaded world as hard limits.
-- Uses the miner/extractor, drill head, module, operating-fluid and purity configuration confirmed in Planning.
-- Reports the limiting raw resource and the extraction capacity of the selected configuration.
-- Starts the maximum search from a physically buildable generator scale instead of an artificial 0.1 MW probe.
-- Rejects mathematically rounded plans that would build zero generators.
-- Searches downward when the current target already exceeds available resources, then refines upward to the limiting target.
-- Extends English localization for dynamic power errors, resource-inventory messages, graph help and stored Satisfactory Plus material labels.
+- Calculates the maximum sustainable net output for the selected generator, fuel chain and configured extraction routes.
+- Uses the loaded world's free or explicitly included occupied resource nodes as hard source limits.
+- Starts the search with a physically operable generator load instead of a microscopic 0.1 MW probe.
+- Rejects zero-generator results as non-buildable.
+- Keeps failed high-load probes as conservative upper bounds instead of aborting the complete maximum calculation.
+- Refines between the last fully buildable plan and the first resource-limited or unsolved higher probe.
+- Evaluates alternate recipes reached by the generation chain with one fixed-target probe each, then performs one full maximum search for the optimized chain.
+- Limits the default recipe evaluation to three improvement passes, 16 candidates or one second and reports a conservative buildable result when the budget is reached.
+- Keeps manually selected recipes and Satisfactory Plus extraction configurations as hard constraints.
+- Reports alternatives that introduce an unconfirmed Satisfactory Plus miner, drill head, module or operating fluid instead of silently choosing one.
+- Preserves selected Satisfactory Plus miners, drill heads, modules and operating fluids.
+- Shows an approximate maximum-calculation duration and improves later estimates from measured runtimes.
 
-# Pioneer Production Planner 1.5.1
+## Included from 1.5.1 – Power-planning fixes
 
 ## Power-planning fixes
 
